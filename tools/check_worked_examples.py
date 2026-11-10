@@ -2048,6 +2048,208 @@ def check_rag() -> None:
         raise AssertionError("descend at M")
 
 
+def solve2(a11, a12, a21, a22, b1, b2):
+    det = a11 * a22 - a12 * a21
+    if det == 0:
+        raise AssertionError("singular")
+    return (b1 * a22 - a12 * b2) / det, (a11 * b2 - b1 * a21) / det
+
+
+def mean_squared(points, weights) -> Fraction:
+    total = Fraction(0)
+    for row in points:
+        pred = sum(weight * x for weight, x in zip(weights, row[:-1]))
+        total += (row[-1] - pred) ** 2
+    return total / len(points)
+
+
+def soft_threshold(z: Fraction, lam: Fraction) -> Fraction:
+    if z > lam:
+        return z - lam
+    if z < -lam:
+        return z + lam
+    return Fraction(0)
+
+
+def check_generalization() -> None:
+    # 三行、两个特征，没有截距。(X^T X + λ I) w = X^T y。
+    train = (
+        (Fraction(1), Fraction(0), Fraction(1)),
+        (Fraction(0), Fraction(1), Fraction(1)),
+        (Fraction(1), Fraction(1), Fraction(0)),
+    )
+    val = (
+        (Fraction(1), Fraction(0), Fraction(1, 2)),
+        (Fraction(0), Fraction(1), Fraction(0)),
+        (Fraction(1), Fraction(1), Fraction(1, 2)),
+    )
+    test = (
+        (Fraction(1), Fraction(0), Fraction(1)),
+        (Fraction(0), Fraction(1), Fraction(0)),
+        (Fraction(1), Fraction(1), Fraction(1)),
+    )
+    solutions = {}
+    for lam in (Fraction(0), Fraction(1), Fraction(3)):
+        w1, w2 = solve2(2 + lam, 1, 1, 2 + lam, 1, 1)
+        if w1 != w2 or w1 != 1 / (3 + lam):
+            raise AssertionError((lam, w1, w2))
+        solutions[lam] = (w1, w2)
+
+    if solutions[0] != (Fraction(1, 3), Fraction(1, 3)):
+        raise AssertionError(solutions[0])
+    if solutions[1] != (Fraction(1, 4), Fraction(1, 4)):
+        raise AssertionError(solutions[1])
+    if solutions[3] != (Fraction(1, 6), Fraction(1, 6)):
+        raise AssertionError(solutions[3])
+
+    train_mse = {lam: mean_squared(train, w) for lam, w in solutions.items()}
+    val_mse = {lam: mean_squared(val, w) for lam, w in solutions.items()}
+    test_mse = {lam: mean_squared(test, w) for lam, w in solutions.items()}
+    if train_mse != {0: Fraction(4, 9), 1: Fraction(11, 24), 3: Fraction(1, 2)}:
+        raise AssertionError(train_mse)
+    if val_mse != {0: Fraction(1, 18), 1: Fraction(1, 24), 3: Fraction(1, 18)}:
+        raise AssertionError(val_mse)
+    if test_mse != {0: Fraction(2, 9), 1: Fraction(7, 24), 3: Fraction(7, 18)}:
+        raise AssertionError(test_mse)
+    if train_mse[1] - train_mse[0] != Fraction(1, 72):
+        raise AssertionError("train gap")
+    if val_mse[0] - val_mse[1] != Fraction(1, 72):
+        raise AssertionError("val gap")
+    if min(val_mse, key=val_mse.get) != 1:
+        raise AssertionError("validation should select λ = 1")
+    if not (test_mse[0] < test_mse[1]):
+        raise AssertionError("test prefers the unselected λ")
+
+    # X^T (y - Xw) = λ w。λ = 0 时残差垂直于列。
+    for lam, (w1, w2) in solutions.items():
+        residuals = []
+        for x1, x2, y in train:
+            residuals.append(y - (w1 * x1 + w2 * x2))
+        dot1 = residuals[0] * 1 + residuals[1] * 0 + residuals[2] * 1
+        dot2 = residuals[0] * 0 + residuals[1] * 1 + residuals[2] * 1
+        if dot1 != lam * w1 or dot2 != lam * w2:
+            raise AssertionError((lam, dot1, dot2))
+
+    def matvec(matrix, vector):
+        return (
+            matrix[0][0] * vector[0] + matrix[0][1] * vector[1],
+            matrix[1][0] * vector[0] + matrix[1][1] * vector[1],
+        )
+
+    gram = ((2, 1), (1, 2))
+    if matvec(gram, (1, 1)) != (3, 3) or matvec(gram, (1, -1)) != (1, -1):
+        raise AssertionError("eigenvalues 3 and 1")
+    shifted = ((3, 1), (1, 3))
+    if matvec(shifted, (1, 1)) != (4, 4) or matvec(shifted, (1, -1)) != (2, -2):
+        raise AssertionError("eigenvalues 4 and 2")
+    if Fraction(3, 1) != 3 or Fraction(4, 2) != 2:
+        raise AssertionError("condition numbers")
+
+    # 正交设计上的一个坐标。L1 目标 (1/2)(w-z)^2 + λ|w|，L2 是 z/(1+λ)。
+    lam = Fraction(1)
+    cases = {
+        Fraction(3): (Fraction(2), Fraction(3, 2)),
+        Fraction(1, 2): (Fraction(0), Fraction(1, 4)),
+        Fraction(-1, 2): (Fraction(0), Fraction(-1, 4)),
+        Fraction(-3): (Fraction(-2), Fraction(-3, 2)),
+    }
+    for z, (w_l1, w_l2) in cases.items():
+        if soft_threshold(z, lam) != w_l1 or z / (1 + lam) != w_l2:
+            raise AssertionError((z, soft_threshold(z, lam)))
+    # |z| ≤ λ 时，次梯度 s = z/λ 使 -z + λ s = 0。
+    z = Fraction(1, 2)
+    s = z / lam
+    if not (-1 <= s <= 1) or -z + lam * s != 0:
+        raise AssertionError("subgradient")
+
+    # 两个点的留一。全数据训练误差选 λ = 0，留一平均选 λ = 1。
+    def fit_through_origin(xy, lam):
+        return sum(x * y for x, y in xy) / (sum(x * x for x, _ in xy) + lam)
+
+    points = ((1, 1), (1, 3))
+    for lam, w_hat, train_error, loo in (
+        (Fraction(0), Fraction(2), Fraction(1), Fraction(4)),
+        (Fraction(1), Fraction(4, 3), Fraction(13, 9), Fraction(13, 4)),
+    ):
+        if fit_through_origin(points, lam) != w_hat:
+            raise AssertionError((lam, fit_through_origin(points, lam)))
+        train_sse = sum((y - w_hat * x) ** 2 for x, y in points)
+        if train_sse / 2 != train_error:
+            raise AssertionError((lam, train_sse))
+        held = []
+        for index in range(2):
+            rest = [points[j] for j in range(2) if j != index]
+            w_fold = fit_through_origin(rest, lam)
+            x, y = points[index]
+            held.append((y - w_fold * x) ** 2)
+        if held[0] != held[1] and lam == 0:
+            raise AssertionError(held)
+        if sum(held) / 2 != loo:
+            raise AssertionError((lam, held))
+    if (Fraction(25, 4), Fraction(1, 4)) != (
+        (3 - Fraction(1, 2)) ** 2,
+        (1 - Fraction(3, 2)) ** 2,
+    ):
+        raise AssertionError("loo squares")
+
+    # 偏差–方差。f = 1，σ² = 1，两个训练集等可能。
+    sigma2 = Fraction(1)
+
+    def decompose(predictions):
+        mean = sum(predictions) / len(predictions)
+        bias2 = (Fraction(1) - mean) ** 2
+        var = sum((p - mean) ** 2 for p in predictions) / len(predictions)
+        return bias2, var, sigma2 + bias2 + var
+
+    if decompose((Fraction(3), Fraction(-1))) != (0, 4, 5):
+        raise AssertionError("model A")
+    if decompose((Fraction(2), Fraction(1))) != (Fraction(1, 4), Fraction(1, 4), Fraction(3, 2)):
+        raise AssertionError("model B")
+    if decompose((Fraction(0), Fraction(0))) != (1, 0, 2):
+        raise AssertionError("constant 0")
+
+    def direct_average(predictions):
+        total = Fraction(0)
+        count = 0
+        for yhat in predictions:
+            for y in (0, 2):
+                total += (Fraction(y) - yhat) ** 2
+                count += 1
+        return total / count
+
+    if direct_average((Fraction(3), Fraction(-1))) != 5:
+        raise AssertionError("direct A")
+    if direct_average((Fraction(2), Fraction(1))) != Fraction(3, 2):
+        raise AssertionError("direct B")
+    if direct_average((Fraction(0),)) != 2:
+        raise AssertionError("direct zero")
+
+    # y ∈ {0, 2}。永远预测 0 的误差期望是 2。样本均值用穷举核对。
+    def expected_mean_errors(n: int):
+        train_sum = Fraction(0)
+        test_sum = Fraction(0)
+        count = 0
+        for mask in range(1 << n):
+            sample = tuple(2 if mask & (1 << i) else 0 for i in range(n))
+            mean = Fraction(sum(sample), n)
+            train_sum += sum((Fraction(y) - mean) ** 2 for y in sample) / n
+            test_sum += sum((Fraction(y) - mean) ** 2 for y in (0, 2)) / 2
+            count += 1
+        return train_sum / count, test_sum / count
+
+    if expected_mean_errors(2) != (Fraction(1, 2), Fraction(3, 2)):
+        raise AssertionError(expected_mean_errors(2))
+    if expected_mean_errors(4) != (Fraction(3, 4), Fraction(5, 4)):
+        raise AssertionError(expected_mean_errors(4))
+    for n in (2, 4):
+        if expected_mean_errors(n) != (Fraction(n - 1, n), Fraction(n + 1, n)):
+            raise AssertionError(n)
+        if Fraction(n + 1, n) - Fraction(n - 1, n) != Fraction(2, n):
+            raise AssertionError("gap")
+    if Fraction(0**2 + 2**2, 2) != 2:
+        raise AssertionError("irreducible second moment")
+
+
 def main() -> None:
     check_softmax()
     check_perplexity()
@@ -2055,6 +2257,7 @@ def main() -> None:
     check_eigen_and_condition()
     check_rank_one_and_lora()
     check_logistic()
+    check_generalization()
     check_backprop()
     check_bpe()
     check_algorithms()
