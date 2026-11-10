@@ -2348,6 +2348,162 @@ def check_minimal_experiment() -> None:
         raise AssertionError(round(float(clean), 4))
 
 
+def check_statistics() -> None:
+    # Y ∈ {0, 2} 各 1/2。n = 2 的四个独立样本，以及第二条是副本的情形。
+    samples = ((0, 0), (0, 2), (2, 0), (2, 2))
+
+    def expectation(values):
+        return sum((Fraction(v) for v in values), Fraction(0)) / len(values)
+
+    def variance(values):
+        mu = expectation(values)
+        return expectation([(v - mu) ** 2 for v in values])
+
+    means = []
+    squared_dev = []
+    sse = []
+    mle = []
+    unbiased = []
+    for sample in samples:
+        mean = Fraction(sum(sample), 2)
+        sq = sum((Fraction(y) - mean) ** 2 for y in sample)
+        means.append(mean)
+        squared_dev.append((mean - 1) ** 2)
+        sse.append(sq)
+        mle.append(sq / 2)
+        unbiased.append(sq / 1)
+    if means != [0, 1, 1, 2] or squared_dev != [1, 0, 0, 1]:
+        raise AssertionError((means, squared_dev))
+    if sse != [0, 2, 2, 0] or mle != [0, 1, 1, 0] or unbiased != [0, 2, 2, 0]:
+        raise AssertionError((sse, mle, unbiased))
+    if expectation(means) != 1 or variance(means) != Fraction(1, 2):
+        raise AssertionError((expectation(means), variance(means)))
+    if expectation([(m - 1) ** 2 for m in means]) != Fraction(1, 2):
+        raise AssertionError("mean mse")
+    if round(math.sqrt(0.5), 4) != 0.7071:
+        raise AssertionError(round(math.sqrt(0.5), 4))
+
+    # 副本：协方差为 1，样本均值的方差不再是 σ²/n。
+    if expectation((0, 2)) != 1 or variance((0, 2)) != 1:
+        raise AssertionError("copied observations")
+    if Fraction(1 + 1 + 2 * 1, 4) != 1 or Fraction(1 + 1, 4) != Fraction(1, 2):
+        raise AssertionError("covariance identity")
+
+    if expectation(mle) != Fraction(1, 2) or expectation(mle) - 1 != Fraction(-1, 2):
+        raise AssertionError("mle bias")
+    if variance(mle) != Fraction(1, 4):
+        raise AssertionError(variance(mle))
+    if variance(mle) + (expectation(mle) - 1) ** 2 != Fraction(1, 2):
+        raise AssertionError("mle mse")
+    if expectation([(v - 1) ** 2 for v in mle]) != Fraction(1, 2):
+        raise AssertionError("mle mse direct")
+    if (expectation(unbiased), variance(unbiased)) != (1, 1):
+        raise AssertionError("unbiased variance")
+    if expectation([(v - 1) ** 2 for v in unbiased]) != 1:
+        raise AssertionError("unbiased mse")
+    # (0, 2) 这一次打中 σ²，四个样本的平均仍是 1/2。
+    if mle[1] != 1 or unbiased[1] != 2:
+        raise AssertionError("single sample")
+
+    # Bernoulli p = 1/2，n = 2。p̂ = k/n，不重推导数。
+    bernoulli = ((0, 0), (0, 1), (1, 0), (1, 1))
+    p_hat = [Fraction(sum(sample), 2) for sample in bernoulli]
+    if p_hat != [0, Fraction(1, 2), Fraction(1, 2), 1]:
+        raise AssertionError(p_hat)
+    if expectation(p_hat) != Fraction(1, 2) or variance(p_hat) != Fraction(1, 8):
+        raise AssertionError((expectation(p_hat), variance(p_hat)))
+    if Fraction(1, 2) * Fraction(1, 2) / 2 != Fraction(1, 8):
+        raise AssertionError("p(1-p)/n")
+
+    se = math.sqrt((0.5 * 0.5) / 2)
+    half = 1.96 * se
+    if (round(se, 4), round(half, 4)) != (0.3536, 0.6930):
+        raise AssertionError((round(se, 4), round(half, 4)))
+    if (round(0.5 - half, 4), round(0.5 + half, 4)) != (-0.1930, 1.1930):
+        raise AssertionError("wald at 1/2")
+    if (round(0.0 - half, 4), round(0.0 + half, 4)) != (-0.6930, 0.6930):
+        raise AssertionError("wald at 0")
+    if (round(1.0 - half, 4), round(1.0 + half, 4)) != (0.3070, 1.6930):
+        raise AssertionError("wald at 1")
+
+    # 0, 2, 4, 6。前两条训练，后两条测试。
+    data = (0, 2, 4, 6)
+    train, test = data[:2], data[2:]
+    mu_train = Fraction(sum(train), len(train))
+    mu_test = Fraction(sum(test), len(test))
+    mu_all = Fraction(sum(data), len(data))
+    if (mu_train, mu_test, mu_all) != (1, 5, 3):
+        raise AssertionError((mu_train, mu_test, mu_all))
+    if mu_all != (2 * mu_train + 2 * mu_test) / 4:
+        raise AssertionError("pooled mean")
+    if mu_all - mu_test != Fraction(len(train), len(data)) * (mu_train - mu_test):
+        raise AssertionError("shrink toward the test mean")
+
+    def sse(points, center) -> Fraction:
+        return sum((Fraction(y) - center) ** 2 for y in points)
+
+    if sse(test, mu_test) != 2:
+        raise AssertionError("test residual about its own mean")
+    if sse(test, mu_train) != 2 + 2 * (mu_test - mu_train) ** 2:
+        raise AssertionError("identity")
+    if (sse(test, mu_train), sse(test, mu_all)) != (34, 10):
+        raise AssertionError("test sse")
+    if (sse(train, mu_train), sse(train, mu_all)) != (2, 10):
+        raise AssertionError("train sse")
+    if (sse(data, mu_train), sse(data, mu_all)) != (36, 20):
+        raise AssertionError("total sse")
+    if not sse(test, mu_all) < sse(test, mu_train):
+        raise AssertionError("full mean should lower the test sum of squares")
+
+    train_var = sse(train, mu_train) / len(train)
+    full_var = sse(data, mu_all) / len(data)
+    if (train_var, full_var) != (1, 5):
+        raise AssertionError((train_var, full_var))
+    if tuple((y - mu_train) / 1 for y in test) != (3, 5):
+        raise AssertionError("train standardization")
+    std = math.sqrt(5)
+    scaled = tuple((y - 3) / std for y in test)
+    assert_close(scaled[0], 1 / math.sqrt(5))
+    assert_close(scaled[1], 3 / math.sqrt(5))
+    if (round(std, 4), round(scaled[0], 4), round(scaled[1], 4)) != (2.2361, 0.4472, 1.3416):
+        raise AssertionError((round(std, 4), round(scaled[0], 4), round(scaled[1], 4)))
+
+    # σ² = 1 时平均负对数似然的梯度是 μ - x̄。学习率 1 从 0 走到均值。
+    if (0 - mu_train, 0 - mu_all) != (-1, -3):
+        raise AssertionError("gradients")
+    if (0 - 1 * (0 - mu_train), 0 - 1 * (0 - mu_all)) != (1, 3):
+        raise AssertionError("one step")
+
+    # c = 1 时单条梯度是 1 或 -1。
+    example_grad = {0: 1, 2: -1}
+    batch_mean = [
+        Fraction(example_grad[a] + example_grad[b], 2) for a, b in samples
+    ]
+    if batch_mean != [1, 0, 0, -1]:
+        raise AssertionError(batch_mean)
+    if expectation(batch_mean) != 0 or variance(batch_mean) != Fraction(1, 2):
+        raise AssertionError("independent minibatch")
+    copied_grad = (1, -1)
+    if expectation(copied_grad) != 0 or variance(copied_grad) != 1:
+        raise AssertionError("duplicated minibatch")
+
+    lr = Fraction(1, 2)
+    updated = [1 - lr * g for g in batch_mean]
+    copied_updated = [1 - lr * g for g in copied_grad]
+    if updated != [Fraction(1, 2), 1, 1, Fraction(3, 2)]:
+        raise AssertionError(updated)
+    if copied_updated != [Fraction(1, 2), Fraction(3, 2)]:
+        raise AssertionError(copied_updated)
+    if expectation(updated) != 1 or variance(updated) != Fraction(1, 8):
+        raise AssertionError((expectation(updated), variance(updated)))
+    if expectation(copied_updated) != 1 or variance(copied_updated) != Fraction(1, 4):
+        raise AssertionError(variance(copied_updated))
+    if lr**2 * variance(batch_mean) != Fraction(1, 8):
+        raise AssertionError("learning rate scales independent variance")
+    if lr**2 * variance(copied_grad) != Fraction(1, 4):
+        raise AssertionError("learning rate scales duplicated variance")
+
+
 def main() -> None:
     check_softmax()
     check_perplexity()
@@ -2362,6 +2518,7 @@ def main() -> None:
     check_training_step()
     check_classification_counts()
     check_probability()
+    check_statistics()
     check_optimizer()
     check_attention()
     check_structures()
