@@ -437,6 +437,402 @@ def check_classification_counts() -> None:
         raise AssertionError((precision, recall, accuracy))
 
 
+def check_probability() -> None:
+    joints = (
+        Fraction(1, 2) * Fraction(3, 4),
+        Fraction(1, 2) * Fraction(1, 4),
+        Fraction(1, 2) * Fraction(1, 4),
+        Fraction(1, 2) * Fraction(3, 4),
+    )
+    if joints != (Fraction(3, 8), Fraction(1, 8), Fraction(1, 8), Fraction(3, 8)):
+        raise AssertionError(joints)
+    if sum(joints) != 1:
+        raise AssertionError(sum(joints))
+
+    p_x2_a = Fraction(3, 4) * Fraction(1, 2) + Fraction(1, 4) * Fraction(1, 2)
+    if p_x2_a != Fraction(1, 2):
+        raise AssertionError(p_x2_a)
+    if joints[0] / p_x2_a != Fraction(3, 4):
+        raise AssertionError("bayes")
+    if joints[3] == Fraction(1, 2) * Fraction(1, 2):
+        raise AssertionError("joint should not factor")
+
+    # X = 1 for token B. Var(X1+X2) uses the joint, not the sum of variances.
+    probs = {
+        (0, 0): Fraction(3, 8),
+        (0, 1): Fraction(1, 8),
+        (1, 0): Fraction(1, 8),
+        (1, 1): Fraction(3, 8),
+    }
+    mean_prod = sum(x * y * p for (x, y), p in probs.items())
+    if mean_prod != Fraction(3, 8):
+        raise AssertionError(mean_prod)
+    cov = mean_prod - Fraction(1, 2) * Fraction(1, 2)
+    if cov != Fraction(1, 8):
+        raise AssertionError(cov)
+    var_sum = Fraction(1, 4) + Fraction(1, 4) + 2 * cov
+    if var_sum != Fraction(3, 4):
+        raise AssertionError(var_sum)
+    second = sum((x + y) ** 2 * p for (x, y), p in probs.items())
+    if second - 1 != var_sum:
+        raise AssertionError(second)
+
+    p_hat = Fraction(3, 4)
+    if p_hat != Fraction(3, 4):
+        raise AssertionError(p_hat)
+    nll_sum = -(3 * math.log(3 / 4) + math.log(1 / 4))
+    assert_close(nll_sum, 4 * math.log(4) - 3 * math.log(3))
+    if round(nll_sum, 4) != 2.2493:
+        raise AssertionError(round(nll_sum, 4))
+
+    counts = (2, 1, 1)
+    total = sum(counts)
+    mle = tuple(Fraction(c, total) for c in counts)
+    if mle != (Fraction(1, 2), Fraction(1, 4), Fraction(1, 4)):
+        raise AssertionError(mle)
+    mean_nll = -sum(
+        (c / total) * math.log(c / total) for c in counts
+    )
+    assert_close(mean_nll, 1.5 * math.log(2))
+    if round(mean_nll, 4) != 1.0397:
+        raise AssertionError(round(mean_nll, 4))
+    uniform_ce = math.log(3)
+    if round(uniform_ce, 4) != 1.0986:
+        raise AssertionError(round(uniform_ce, 4))
+    assert_close(uniform_ce - mean_nll, math.log(3) - 1.5 * math.log(2))
+    if uniform_ce <= mean_nll:
+        raise AssertionError("uniform cross entropy should be larger")
+
+    data = (1, 2, 3)
+    mean = Fraction(sum(data), len(data))
+    sq = sum((Fraction(x) - mean) ** 2 for x in data)
+    if (mean, sq, sq / 3, sq / 2) != (2, 2, Fraction(2, 3), 1):
+        raise AssertionError((mean, sq))
+
+
+def check_optimizer() -> None:
+    # L = w^2 / 2, gradient is w, w <- (1-lr) w.
+    def trajectory(lr: Fraction, steps: int = 4) -> tuple[Fraction, ...]:
+        w = Fraction(1)
+        values = [w]
+        for _ in range(steps):
+            w = (1 - lr) * w
+            values.append(w)
+        return tuple(values)
+
+    if trajectory(Fraction(1, 2)) != (1, Fraction(1, 2), Fraction(1, 4), Fraction(1, 8), Fraction(1, 16)):
+        raise AssertionError(trajectory(Fraction(1, 2)))
+    if trajectory(2) != (1, -1, 1, -1, 1):
+        raise AssertionError(trajectory(2))
+    if trajectory(3) != (1, -2, 4, -8, 16):
+        raise AssertionError(trajectory(3))
+
+    # Mean reduction vs sum reduction.
+    mean_step = 0.0 - 0.1 * ((1 + 3) / 2)
+    sum_step = 0.0 - 0.1 * (1 + 3)
+    assert_close(mean_step, -0.2)
+    assert_close(sum_step, -0.4)
+
+    w = Fraction(1)
+    v = Fraction(0)
+    lr = Fraction(1, 10)
+    mu = Fraction(9, 10)
+    expected = (
+        (Fraction(1), Fraction(9, 10)),
+        (Fraction(9, 5), Fraction(18, 25)),
+        (Fraction(117, 50), Fraction(243, 500)),
+    )
+    for step, (v_hat, w_hat) in enumerate(expected, start=1):
+        g = w
+        v = mu * v + g
+        w = w - lr * v
+        if (v, w) != (v_hat, w_hat):
+            raise AssertionError((step, v, w))
+    # Drop the velocity after step 2 and take one more step from w = 18/25.
+    w_reset = Fraction(18, 25) - lr * Fraction(18, 25)
+    if w_reset != Fraction(81, 125):
+        raise AssertionError(w_reset)
+
+    plain = Fraction(1)
+    for _ in range(3):
+        plain = plain - lr * plain
+    if plain != Fraction(729, 1000):
+        raise AssertionError(plain)
+
+    beta1, beta2 = 0.9, 0.999
+    g = 0.5
+    m = (1 - beta1) * g
+    v_mom = (1 - beta2) * g * g
+    m_hat = m / (1 - beta1)
+    v_hat = v_mom / (1 - beta2)
+    assert_close(m, 0.05)
+    assert_close(v_mom, 0.00025)
+    assert_close(m_hat, 0.5)
+    assert_close(v_hat, 0.25)
+    assert_close(m_hat / math.sqrt(v_hat), 1.0)
+    uncorrected = m / math.sqrt(v_mom)
+    assert_close(uncorrected, math.sqrt(10))
+    assert_close(0.001 * uncorrected, 0.001 * math.sqrt(10))
+
+    m2 = beta1 * m + (1 - beta1) * g
+    v2 = beta2 * v_mom + (1 - beta2) * g * g
+    assert_close(m2 / (1 - beta1**2), 0.5)
+    assert_close(v2 / (1 - beta2**2), 0.25)
+
+    def adamw(theta, grad, lam, eps):
+        updated = []
+        for th, g_i in zip(theta, grad):
+            decayed = th * (1 - 0.001 * lam)
+            if g_i == 0.0:
+                adapt = 0.0
+            else:
+                m_i = (1 - beta1) * g_i
+                v_i = (1 - beta2) * g_i * g_i
+                m_h = m_i / (1 - beta1)
+                v_h = v_i / (1 - beta2)
+                adapt = m_h / (math.sqrt(v_h) + eps)
+            updated.append(decayed - 0.001 * adapt)
+        return updated
+
+    def coupled(theta, grad, lam, eps):
+        updated = []
+        for th, g_i in zip(theta, grad):
+            g_p = g_i + lam * th
+            m_i = (1 - beta1) * g_p
+            v_i = (1 - beta2) * g_p * g_p
+            m_h = m_i / (1 - beta1)
+            v_h = v_i / (1 - beta2)
+            adapt = m_h / (math.sqrt(v_h) + eps)
+            updated.append(th - 0.001 * adapt)
+        return updated
+
+    exact = adamw((1.0, 1.0), (0.5, 0.0), 0.01, 0.0)
+    assert_close(exact[0], 0.99899)
+    assert_close(exact[1], 0.99999)
+    coupled_exact = coupled((1.0, 1.0), (0.5, 0.0), 0.01, 0.0)
+    assert_close(coupled_exact[0], 0.999)
+    assert_close(coupled_exact[1], 0.999)
+    tiny = adamw((1.0, 1.0), (0.5, 0.0), 0.01, 1e-8)
+    assert_close(tiny[1], 0.99999)
+    assert_close(tiny[0], 0.99899, tol=1e-8)
+
+    def cosine_multiplier(step: int, warmup: int = 4, total: int = 8) -> float:
+        if step < warmup:
+            return step / warmup
+        progress = (step - warmup) / (total - warmup)
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+    assert_close(cosine_multiplier(0), 0.0)
+    assert_close(cosine_multiplier(1), 0.25)
+    assert_close(cosine_multiplier(4), 1.0)
+    assert_close(cosine_multiplier(5), 0.5 + math.sqrt(2) / 4)
+    assert_close(cosine_multiplier(6), 0.5)
+    assert_close(cosine_multiplier(8), 0.0)
+    assert_close(cosine_multiplier(4) * 0.001, 0.001)
+    assert_close(cosine_multiplier(6) * 0.001, 0.0005)
+
+    def nll_double_well(value: float) -> float:
+        return value**4 / 4 - value**2 / 2
+
+    def grad_double_well(value: float) -> float:
+        return value**3 - value
+
+    start = 0.5
+    nxt = start - 0.1 * grad_double_well(start)
+    assert_close(grad_double_well(start), -0.375)
+    assert_close(nxt, 0.5375)
+    assert_close(nll_double_well(start), -0.109375)
+    assert_close(nll_double_well(1.0), -0.25)
+    assert_close(nll_double_well(-1.0), -0.25)
+    if not (nll_double_well(nxt) < nll_double_well(start) < 0.0):
+        raise AssertionError("loss should fall while staying above the minima")
+    other = -0.5 - 0.1 * grad_double_well(-0.5)
+    assert_close(other, -0.5375)
+
+
+def softmax_with_mask(row: list[float]) -> list[float]:
+    finite = [x for x in row if x > float("-inf")]
+    if not finite:
+        raise AssertionError("softmax of an all-masked row")
+    peak = max(finite)
+    weights = [0.0 if x == float("-inf") else math.exp(x - peak) for x in row]
+    total = sum(weights)
+    return [w / total for w in weights]
+
+
+def causal_attention(
+    q: list[list[float]], k: list[list[float]], v: list[list[float]]
+) -> tuple[list[list[float]], list[list[float]]]:
+    scale = math.sqrt(len(q[0]))
+    weights: list[list[float]] = []
+    outputs: list[list[float]] = []
+    for i, qi in enumerate(q):
+        scores = []
+        for j, kj in enumerate(k):
+            dot = sum(a * b for a, b in zip(qi, kj))
+            scores.append(float("-inf") if j > i else dot / scale)
+        row = softmax_with_mask(scores)
+        mixed = [0.0] * len(v[0])
+        for weight, vj in zip(row, v):
+            for d, value in enumerate(vj):
+                mixed[d] += weight * value
+        weights.append(row)
+        outputs.append(mixed)
+    return weights, outputs
+
+
+def check_attention() -> None:
+    q = [
+        [0.0, 2.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0, 0.0],
+        [1.0, 2.0, 0.0, 0.0],
+    ]
+    k = [
+        [2.0, 0.0, 0.0, 0.0],
+        [0.0, 2.0, 0.0, 0.0],
+        [0.0, 0.0, 2.0, 0.0],
+    ]
+    v = [
+        [1.0, 0.0],
+        [0.0, 1.0],
+        [1.0, 1.0],
+    ]
+    weights, outputs = causal_attention(q, k, v)
+    if weights[0] != [1.0, 0.0, 0.0]:
+        raise AssertionError(weights[0])
+    if weights[1] != [0.5, 0.5, 0.0]:
+        raise AssertionError(weights[1])
+    third = softmax([1.0, 2.0, 0.0])
+    for left, right in zip(weights[2], third):
+        assert_close(left, right)
+    if tuple(round(p, 4) for p in third) != (0.2447, 0.6652, 0.0900):
+        raise AssertionError(tuple(round(p, 4) for p in third))
+    assert_close(outputs[0][0], 1.0)
+    assert_close(outputs[0][1], 0.0)
+    assert_close(outputs[1][0], 0.5)
+    assert_close(outputs[1][1], 0.5)
+    rounded_out = tuple(round(x, 4) for x in outputs[2])
+    if rounded_out != (0.3348, 0.7553):
+        raise AssertionError(rounded_out)
+    # Rounded weights times V differ in the fourth decimal.
+    rough0 = 0.2447 * 1 + 0.6652 * 0 + 0.0900 * 1
+    rough1 = 0.2447 * 0 + 0.6652 * 1 + 0.0900 * 1
+    if (round(rough0, 4), round(rough1, 4)) != (0.3347, 0.7552):
+        raise AssertionError((rough0, rough1))
+
+    unmasked = softmax([0.0, 2.0, 0.0])
+    if tuple(round(p, 4) for p in unmasked) != (0.1065, 0.7870, 0.1065):
+        raise AssertionError(tuple(round(p, 4) for p in unmasked))
+    unmasked_out = (
+        unmasked[0] * 1 + unmasked[2] * 1,
+        unmasked[1] * 1 + unmasked[2] * 1,
+    )
+    if tuple(round(x, 4) for x in unmasked_out) != (0.2130, 0.8935):
+        raise AssertionError(tuple(round(x, 4) for x in unmasked_out))
+
+    zeroed = softmax([0.0, 0.0, 0.0])
+    for weight in zeroed:
+        assert_close(weight, 1 / 3)
+    if (1 + 0 + 1) / 3 != 2 / 3 or (0 + 1 + 1) / 3 != 2 / 3:
+        raise AssertionError("masked-as-zero output")
+
+    # Two heads, all scores 0, W_O = I keeps the concatenation.
+    head1 = ((1.0, 0.0), (0.5, 0.5))
+    head2 = ((0.0, 1.0), (0.5, 0.5))
+    concat = (
+        head1[0] + head2[0],
+        head1[1] + head2[1],
+    )
+    if concat != ((1.0, 0.0, 0.0, 1.0), (0.5, 0.5, 0.5, 0.5)):
+        raise AssertionError(concat)
+    w_o = (
+        (1.0, 0.0, 1.0, 0.0),
+        (0.0, 1.0, 0.0, 1.0),
+        (0.0, 0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0, 0.0),
+    )
+    projected = tuple(
+        tuple(sum(c * w for c, w in zip(row, basis)) for basis in w_o) for row in concat
+    )
+    if projected != ((1.0, 1.0, 0.0, 0.0), (1.0, 1.0, 0.0, 0.0)):
+        raise AssertionError(projected)
+
+    # Bidirectional, no positions: swapping inputs swaps outputs.
+    s = 1 / math.sqrt(2)
+    left = softmax([s, 0.0])
+    if tuple(round(p, 4) for p in left) != (0.6698, 0.3302):
+        raise AssertionError(tuple(round(p, 4) for p in left))
+    ab0 = (left[0], left[1])
+    ab1 = (left[1], left[0])
+    if tuple(round(x, 4) for x in ab0) != (0.6698, 0.3302):
+        raise AssertionError(ab0)
+    if tuple(round(x, 4) for x in ab1) != (0.3302, 0.6698):
+        raise AssertionError(ab1)
+
+    if 10000 ** (2 / 4) != 100:
+        raise AssertionError("frequency base")
+    pe0 = (math.sin(0), math.cos(0), math.sin(0), math.cos(0.0 / 100))
+    if pe0 != (0.0, 1.0, 0.0, 1.0):
+        raise AssertionError(pe0)
+    added = tuple(e + p for e, p in zip((1, 2, 3, 4), pe0))
+    if added != (1, 3, 3, 5):
+        raise AssertionError(added)
+    pe1 = (math.sin(1), math.cos(1), math.sin(0.01), math.cos(0.01))
+    if tuple(round(x, 4) for x in pe1[:2]) != (0.8415, 0.5403):
+        raise AssertionError(pe1)
+    if round(pe1[2], 4) != 0.0100:
+        raise AssertionError(round(pe1[2], 4))
+    if round(pe1[3], 6) != 0.999950:
+        raise AssertionError(round(pe1[3], 6))
+    pe2 = (math.sin(2), math.cos(2))
+    rotated = (
+        math.cos(1) * pe1[0] + math.sin(1) * pe1[1],
+        -math.sin(1) * pe1[0] + math.cos(1) * pe1[1],
+    )
+    assert_close(rotated[0], pe2[0])
+    assert_close(rotated[1], pe2[1])
+    if tuple(round(x, 4) for x in pe2) != (0.9093, -0.4161):
+        raise AssertionError(tuple(round(x, 4) for x in pe2))
+
+    full = 4 * 512 * 512
+    with_bias = full + 4 * 512
+    if (full, with_bias) != (1_048_576, 1_050_624):
+        raise AssertionError((full, with_bias))
+    if 4 * 4 * 4 != 64 or 64 + 4 * 4 != 80:
+        raise AssertionError("d_model 4 attention params")
+    if 8 * 512 * 512 != 2_097_152:
+        raise AssertionError("ffn params")
+    if 1024**2 != 1_048_576 or 2048**2 != 4 * 1024**2:
+        raise AssertionError("score matrix growth")
+
+    # Pre-norm vs post-norm with a constant sublayer (1/2, -1/2).
+    pre = (1 + 0.5, 3 - 0.5)
+    if pre != (1.5, 2.5):
+        raise AssertionError(pre)
+    mean = sum(pre) / 2
+    var = sum((x - mean) ** 2 for x in pre) / 2
+    post = tuple((x - mean) / math.sqrt(var) for x in pre)
+    assert_close(post[0], -1.0)
+    assert_close(post[1], 1.0)
+
+    # FFN: y = x @ W.T + b, one ReLU unit is off.
+    x_ffn = (1.0, -2.0)
+    w1 = ((1.0, 1.0), (1.0, -1.0))
+    pre = tuple(sum(x_ffn[k] * row[k] for k in range(2)) for row in w1)
+    if pre != (-1.0, 3.0):
+        raise AssertionError(pre)
+    relu = tuple(h if h > 0.0 else 0.0 for h in pre)
+    if relu != (0.0, 3.0):
+        raise AssertionError(relu)
+    w2 = ((2.0, 1.0), (0.0, 1.0))
+    ffn = tuple(sum(relu[k] * row[k] for k in range(2)) for row in w2)
+    if ffn != (3.0, 3.0):
+        raise AssertionError(ffn)
+    residual = (x_ffn[0] + ffn[0], x_ffn[1] + ffn[1])
+    if residual != (4.0, 1.0):
+        raise AssertionError(residual)
+
+
 def main() -> None:
     check_softmax()
     check_perplexity()
@@ -449,6 +845,9 @@ def main() -> None:
     check_algorithms()
     check_training_step()
     check_classification_counts()
+    check_probability()
+    check_optimizer()
+    check_attention()
     print("ok")
 
 
