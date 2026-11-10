@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """复核笔记里的手算例子。只使用标准库。
 
-教学笔记中的参考实现和数字应与本文件一致。改笔记里的例子时，先改这里再运行：
-
     python3 tools/check_worked_examples.py
 """
 
