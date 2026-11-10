@@ -1712,6 +1712,342 @@ def check_inference() -> None:
         raise AssertionError(throughput)
 
 
+def rag_chunks(tokens: list[str], size: int, stride: int) -> list[list[str]]:
+    """起点 0, stride, 2 stride, ... 只要起点还在文档内就切一块。"""
+    chunks: list[list[str]] = []
+    start = 0
+    while start < len(tokens):
+        chunks.append(tokens[start : start + size])
+        start += stride
+    return chunks
+
+
+def rag_search_layer(
+    graph: dict[str, list[str]],
+    dist: dict[str, int],
+    entry: str,
+    ef: int,
+) -> set[str]:
+    """HNSW 一层搜索：ef 是结果列表的上限。距离更小者优先。"""
+    visited = {entry}
+    candidates = {entry}
+    found = {entry}
+    while candidates:
+        current = min(candidates, key=lambda name: (dist[name], name))
+        candidates.remove(current)
+        furthest = max(found, key=lambda name: (dist[name], name))
+        if dist[current] > dist[furthest]:
+            break
+        for neighbor in graph[current]:
+            if neighbor in visited:
+                continue
+            visited.add(neighbor)
+            furthest = max(found, key=lambda name: (dist[name], name))
+            if dist[neighbor] < dist[furthest] or len(found) < ef:
+                candidates.add(neighbor)
+                found.add(neighbor)
+                if len(found) > ef:
+                    found.remove(max(found, key=lambda name: (dist[name], name)))
+    return found
+
+
+def check_rag() -> None:
+    query = (3, 1)
+    vectors = {"甲": (3, 1), "乙": (9, -7), "丙": (1, 2), "丁": (0, 3)}
+
+    def dot(left: tuple[int, int], right: tuple[int, int]) -> int:
+        return left[0] * right[0] + left[1] * right[1]
+
+    def dist2(left: tuple[int, int], right: tuple[int, int]) -> int:
+        return (left[0] - right[0]) ** 2 + (left[1] - right[1]) ** 2
+
+    dots = {name: dot(query, vector) for name, vector in vectors.items()}
+    if dots != {"甲": 10, "乙": 20, "丙": 5, "丁": 3}:
+        raise AssertionError(dots)
+    distances = {name: dist2(query, vector) for name, vector in vectors.items()}
+    if distances != {"甲": 0, "乙": 100, "丙": 5, "丁": 13}:
+        raise AssertionError(distances)
+    q_norm = math.sqrt(dot(query, query))
+    cosines = {
+        name: dots[name] / (q_norm * math.sqrt(dot(vector, vector)))
+        for name, vector in vectors.items()
+    }
+    assert_close(cosines["甲"], 1.0)
+    assert_close(cosines["乙"], 2 / math.sqrt(13))
+    assert_close(cosines["丙"], 1 / math.sqrt(2))
+    assert_close(cosines["丁"], 1 / math.sqrt(10))
+    rounded_cos = tuple(round(cosines[name], 4) for name in ("乙", "丙", "丁"))
+    if rounded_cos != (0.5547, 0.7071, 0.3162):
+        raise AssertionError(rounded_cos)
+    by_dot = tuple(sorted(dots, key=lambda name: -dots[name]))
+    by_cos = tuple(sorted(cosines, key=lambda name: -cosines[name]))
+    by_dist = tuple(sorted(distances, key=lambda name: distances[name]))
+    if (by_dot, by_cos, by_dist) != (
+        ("乙", "甲", "丙", "丁"),
+        ("甲", "丙", "乙", "丁"),
+        ("甲", "丙", "丁", "乙"),
+    ):
+        raise AssertionError((by_dot, by_cos, by_dist))
+
+    # 未归一化的点积做 softmax 时，乙几乎拿走全部质量。
+    weights = [math.exp(value - dots["乙"]) for value in dots.values()]
+    if weights[list(dots).index("乙")] / sum(weights) <= 0.9999:
+        raise AssertionError("inner-product softmax should concentrate on 乙")
+
+    def recall(ranked: tuple[str, ...] | list[str], relevant: set[str], k: int) -> Fraction:
+        hit = len(set(ranked[:k]) & relevant)
+        return Fraction(hit, len(relevant))
+
+    def hit(ranked: tuple[str, ...] | list[str], relevant: set[str], k: int) -> int:
+        return int(bool(set(ranked[:k]) & relevant))
+
+    topical = {"甲", "丙"}
+    if (recall(by_cos, topical, 1), recall(by_cos, topical, 2)) != (Fraction(1, 2), 1):
+        raise AssertionError("cosine recall")
+    if (hit(by_cos, topical, 1), hit(by_cos, topical, 2)) != (1, 1):
+        raise AssertionError("cosine hit")
+    if (recall(by_dot, topical, 1), recall(by_dot, topical, 2), recall(by_dot, topical, 3)) != (
+        0,
+        Fraction(1, 2),
+        1,
+    ):
+        raise AssertionError("inner-product recall")
+    if (hit(by_dot, topical, 1), hit(by_dot, topical, 2)) != (0, 1):
+        raise AssertionError("inner-product hit")
+    if (recall(by_dist, topical, 1), recall(by_dist, topical, 2)) != (Fraction(1, 2), 1):
+        raise AssertionError("euclidean recall")
+
+    # Lucene IDF 与 Robertson–Zaragoza 式 (3.3)。N = 4，两个查询词都出现在 2 篇里。
+    n_docs, n_containing = 4, 2
+    robertson_idf = math.log((n_docs - n_containing + 0.5) / (n_containing + 0.5))
+    lucene_idf = math.log(1 + (n_docs - n_containing + 0.5) / (n_containing + 0.5))
+    assert_close(robertson_idf, 0.0)
+    assert_close(lucene_idf, math.log(2))
+    if round(lucene_idf, 4) != 0.6931:
+        raise AssertionError(round(lucene_idf, 4))
+
+    k1, b = Fraction(6, 5), Fraction(3, 4)
+    avgdl = Fraction(4)
+    lengths = {"甲": 9, "乙": 3, "丙": 2, "丁": 2}
+    term_freqs = {
+        "甲": (1, 1),
+        "乙": (3, 0),
+        "丙": (0, 1),
+        "丁": (0, 0),
+    }
+
+    def bm25_coefficient(dl: int, freqs: tuple[int, int]) -> Fraction:
+        norm = (1 - b) + b * Fraction(dl, avgdl)
+        total = Fraction(0)
+        for freq in freqs:
+            if freq == 0:
+                continue
+            total += Fraction(freq) / (freq + k1 * norm)
+        return total
+
+    coefficients = {
+        name: bm25_coefficient(lengths[name], term_freqs[name]) for name in lengths
+    }
+    if coefficients != {
+        "甲": Fraction(80, 133),
+        "乙": Fraction(40, 53),
+        "丙": Fraction(4, 7),
+        "丁": Fraction(0),
+    }:
+        raise AssertionError(coefficients)
+    bm25_scores = {name: float(coefficients[name]) * lucene_idf for name in coefficients}
+    rounded_bm25 = tuple(round(bm25_scores[name], 4) for name in ("甲", "乙", "丙", "丁"))
+    if rounded_bm25 != (0.4169, 0.5231, 0.3961, 0.0):
+        raise AssertionError(rounded_bm25)
+    bm25_order = tuple(sorted(bm25_scores, key=lambda name: -bm25_scores[name]))
+    if bm25_order != ("乙", "甲", "丙", "丁"):
+        raise AssertionError(bm25_order)
+    answer = {"甲"}
+    if (recall(bm25_order, answer, 1), recall(bm25_order, answer, 2)) != (0, 1):
+        raise AssertionError("bm25 recall of 甲")
+    # 把「含有查询词」当成相关集时，命中变成 1，召回率只有 1/3。天数仍不在第一名。
+    lexical = {"乙", "甲", "丙"}
+    if (recall(bm25_order, lexical, 1), hit(bm25_order, lexical, 1)) != (Fraction(1, 3), 1):
+        raise AssertionError("relabeling the relevant set")
+    # 词频饱和的上限是 IDF。乙走到了 40/53。
+    if coefficients["乙"] != Fraction(40, 53):
+        raise AssertionError("saturation progress")
+    if round(float(Fraction(40, 53)), 4) != 0.7547:
+        raise AssertionError("40/53")
+    variant = tuple(round(2.2 * bm25_scores[name], 4) for name in ("甲", "乙", "丙"))
+    if variant != (0.9172, 1.1509, 0.8714):
+        raise AssertionError(variant)
+    # 先收成四位再乘，乙的第四位会从 1.1509 写成 1.1508。
+    if round(round(bm25_scores["乙"], 4) * 2.2, 4) != 1.1508:
+        raise AssertionError("rounding before scaling")
+    if round((11 / 5) * lucene_idf, 4) != 1.5249:
+        raise AssertionError("variant ceiling")
+
+    # Robertson 与 Zaragoza 提到的另一组常见参数。顺序在这四篇上不变。
+    k1_alt, b_alt = Fraction(2), Fraction(1, 2)
+
+    def bm25_alt(dl: int, freqs: tuple[int, int]) -> Fraction:
+        norm = (1 - b_alt) + b_alt * Fraction(dl, avgdl)
+        total = Fraction(0)
+        for freq in freqs:
+            if freq == 0:
+                continue
+            total += Fraction(freq) / (freq + k1_alt * norm)
+        return total
+
+    alt = {name: bm25_alt(lengths[name], term_freqs[name]) for name in lengths}
+    if alt != {"甲": Fraction(8, 17), "乙": Fraction(12, 19), "丙": Fraction(2, 5), "丁": Fraction(0)}:
+        raise AssertionError(alt)
+    alt_rounded = tuple(round(float(alt[name]) * lucene_idf, 4) for name in ("甲", "乙", "丙"))
+    if alt_rounded != (0.3262, 0.4378, 0.2773):
+        raise AssertionError(alt_rounded)
+    if not alt["乙"] > alt["甲"] > alt["丙"]:
+        raise AssertionError("alternate parameters should keep 乙 first")
+
+    # 直接相加时，余弦的差距盖过 BM25。
+    mixed = {name: bm25_scores[name] + cosines[name] for name in vectors}
+    mixed_rounded = tuple(round(mixed[name], 4) for name in ("甲", "乙", "丙", "丁"))
+    if mixed_rounded != (1.4169, 1.0778, 1.1032, 0.3162):
+        raise AssertionError(mixed_rounded)
+    if round(bm25_scores["乙"] - bm25_scores["甲"], 4) != 0.1062:
+        raise AssertionError("bm25 lead")
+    if round(cosines["甲"] - cosines["乙"], 4) != 0.4453:
+        raise AssertionError("cosine lead")
+    mixed_order = tuple(sorted(mixed, key=lambda name: -mixed[name]))
+    if mixed_order != ("甲", "丙", "乙", "丁"):
+        raise AssertionError(mixed_order)
+
+    bm25_rank = {name: index + 1 for index, name in enumerate(bm25_order)}
+    cosine_rank = {name: index + 1 for index, name in enumerate(by_cos)}
+    k_rrf = 60
+    rrf_scores = {
+        name: Fraction(1, k_rrf + bm25_rank[name]) + Fraction(1, k_rrf + cosine_rank[name])
+        for name in vectors
+    }
+    if rrf_scores != {
+        "甲": Fraction(123, 3782),
+        "乙": Fraction(124, 3843),
+        "丙": Fraction(125, 3906),
+        "丁": Fraction(1, 32),
+    }:
+        raise AssertionError(rrf_scores)
+    rrf_rounded = tuple(round(float(rrf_scores[name]), 4) for name in ("甲", "乙", "丙"))
+    if rrf_rounded != (0.0325, 0.0323, 0.0320):
+        raise AssertionError(rrf_rounded)
+    assert_close(float(rrf_scores["丁"]), 0.03125)
+    rrf_order = tuple(sorted(rrf_scores, key=lambda name: -rrf_scores[name]))
+    if rrf_order != ("甲", "乙", "丙", "丁"):
+        raise AssertionError(rrf_order)
+    if (recall(bm25_order, answer, 1), recall(rrf_order, answer, 1)) != (0, 1):
+        raise AssertionError("rrf recall")
+
+    # 交叉编码器的 logit 经 sigmoid 后顺序不变。
+    rerank_logits = {"甲": 2.0, "乙": 0.0, "丙": -1.0}
+    rerank_probs = {name: 1 / (1 + math.exp(-logit)) for name, logit in rerank_logits.items()}
+    if (
+        round(rerank_probs["甲"], 4),
+        rerank_probs["乙"],
+        round(rerank_probs["丙"], 4),
+    ) != (0.8808, 0.5, 0.2689):
+        raise AssertionError(rerank_probs)
+    rerank_order = tuple(sorted(rerank_logits, key=lambda name: -rerank_logits[name]))
+    if rerank_order != ("甲", "乙", "丙"):
+        raise AssertionError(rerank_order)
+
+    # 一个 token 上，RAG-Sequence 与 RAG-Token 都是这个和式。
+    p_seven = Fraction(3, 5) * Fraction(3, 4) + Fraction(2, 5) * Fraction(1, 10)
+    p_three = Fraction(3, 5) * Fraction(1, 4) + Fraction(2, 5) * Fraction(9, 10)
+    if (p_seven, p_three) != (Fraction(49, 100), Fraction(51, 100)):
+        raise AssertionError((p_seven, p_three))
+    if not (Fraction(3, 4) > Fraction(1, 4) and p_three > p_seven):
+        raise AssertionError("marginalization should flip the argmax")
+
+    document = "本公司 规定 退货 期限 是 七 天 请 保留 发票".split()
+    if len(document) != 10:
+        raise AssertionError(len(document))
+    disjoint = rag_chunks(document, 4, 4)
+    if disjoint != [
+        ["本公司", "规定", "退货", "期限"],
+        ["是", "七", "天", "请"],
+        ["保留", "发票"],
+    ]:
+        raise AssertionError(disjoint)
+    if any("退货" in chunk and "七" in chunk for chunk in disjoint):
+        raise AssertionError("disjoint chunks should split the evidence")
+    overlapped = rag_chunks(document, 4, 2)
+    if overlapped[1] != ["退货", "期限", "是", "七"]:
+        raise AssertionError(overlapped)
+    if sum(len(chunk) for chunk in overlapped) != 18:
+        raise AssertionError(sum(len(chunk) for chunk in overlapped))
+    if sum("退货" in chunk and "七" in chunk for chunk in overlapped) != 1:
+        raise AssertionError("one overlapped chunk keeps both terms")
+
+    jia = "退货 的 期限 是 七 天 并且 需要 发票".split()
+    yi = ["退货", "退货", "退货"]
+    if (len(jia), len(yi)) != (9, 3):
+        raise AssertionError("chunk lengths")
+    budget = 7
+    jia_first = (jia + yi)[:budget]
+    yi_first = (yi + jia)[:budget]
+    if jia_first != "退货 的 期限 是 七 天 并且".split() or "七" not in jia_first:
+        raise AssertionError(jia_first)
+    if yi_first != "退货 退货 退货 退货 的 期限 是".split() or "七" in yi_first:
+        raise AssertionError(yi_first)
+
+    def pack(items: list[tuple[str, int]], limit: int) -> list[str]:
+        chosen: list[str] = []
+        remaining = limit
+        for name, length in items:
+            if length <= remaining:
+                chosen.append(name)
+                remaining -= length
+        return chosen
+
+    short_first = pack([("丙", 2), ("丁", 2), ("乙", 3), ("甲", 9)], 11)
+    rerank_pack = pack([("甲", 9), ("乙", 3), ("丙", 2)], 11)
+    if short_first != ["丙", "丁", "乙"] or rerank_pack != ["甲", "丙"]:
+        raise AssertionError((short_first, rerank_pack))
+
+    # 三条主张：上下文忠实 2/3，引用正确 1/3。
+    supported_by_prompt = (True, True, False)
+    citation_ok = (True, False, False)
+    if (
+        Fraction(sum(supported_by_prompt), 3),
+        Fraction(sum(citation_ok), 3),
+    ) != (Fraction(2, 3), Fraction(1, 3)):
+        raise AssertionError("faithfulness")
+    # 丢掉没有引用的第三条之后，前两条都由提示支持。
+    if Fraction(sum(supported_by_prompt[:2]), 2) != 1:
+        raise AssertionError("dropped claim")
+
+    # IVF：nprobe = 1 打开错误的桶。
+    centroids = (0, 10)
+    points = {"a": 4, "b": 9}
+    lists: dict[int, list[str]] = {centroid: [] for centroid in centroids}
+    for name, point in points.items():
+        owner = min(centroids, key=lambda centroid: abs(point - centroid))
+        lists[owner].append(name)
+    if lists != {0: ["a"], 10: ["b"]}:
+        raise AssertionError(lists)
+    query_1d = 6
+    probed = min(centroids, key=lambda centroid: abs(query_1d - centroid))
+    if probed != 10 or abs(query_1d - points["b"]) != 3 or abs(query_1d - points["a"]) != 2:
+        raise AssertionError("ivf distances")
+
+    # HNSW 底层。ef = 1 停在 B；ef = 2 能走到 C。
+    hnsw_dist = {"A": 5, "B": 2, "C": 1, "M": 3}
+    base_graph = {"A": ["B"], "B": ["A", "M"], "M": ["B", "C"], "C": ["M"]}
+    if rag_search_layer(base_graph, hnsw_dist, "A", 1) != {"B"}:
+        raise AssertionError("ef 1")
+    if rag_search_layer(base_graph, hnsw_dist, "A", 2) != {"C", "B"}:
+        raise AssertionError("ef 2")
+    upper_graph = {"A": ["M"], "M": ["A"], "B": [], "C": []}
+    if rag_search_layer(upper_graph, hnsw_dist, "A", 1) != {"M"}:
+        raise AssertionError("upper layer")
+    if rag_search_layer(base_graph, hnsw_dist, "M", 1) != {"C"}:
+        raise AssertionError("descend at M")
+
+
 def main() -> None:
     check_softmax()
     check_perplexity()
@@ -1732,6 +2068,7 @@ def main() -> None:
     check_pretraining()
     check_alignment()
     check_evaluation()
+    check_rag()
     check_inference()
     print("ok")
 
