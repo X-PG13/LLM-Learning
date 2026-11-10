@@ -1525,6 +1525,193 @@ def check_evaluation() -> None:
     assert_close(math.sqrt(1.0 * 0.0 / 40), 0.0)
 
 
+def round_half_away(value: Fraction) -> int:
+    """最近整数；恰好在两个整数正中时远离 0。"""
+    if value < 0:
+        return -round_half_away(-value)
+    return (value.numerator + value.denominator // 2) // value.denominator
+
+
+def symmetric_quantize(weights: tuple[Fraction, ...], qmax: int) -> tuple[tuple[int, ...], Fraction, tuple[Fraction, ...]]:
+    peak = max(abs(w) for w in weights)
+    if peak == 0:
+        return tuple(0 for _ in weights), Fraction(0), tuple(Fraction(0) for _ in weights)
+    scale = peak / qmax
+    codes = tuple(round_half_away(w / scale) for w in weights)
+    if any(code < -qmax or code > qmax for code in codes):
+        raise AssertionError(codes)
+    restored = tuple(code * scale for code in codes)
+    errors = tuple(w - hat for w, hat in zip(weights, restored))
+    return codes, scale, errors
+
+
+def check_inference() -> None:
+    # Mistral 7B 表 1 的 GQA 形状。留下 2048，批量 4，每元素 2 字节。
+    layers, kv_heads, head_dim, seq, batch, width = 32, 8, 128, 2048, 4, 2
+    kv_bytes = layers * 2 * kv_heads * head_dim * seq * batch * width
+    if kv_bytes != 2**30:
+        raise AssertionError(kv_bytes)
+    query_heads = 32
+    mha_bytes = layers * 2 * query_heads * head_dim * seq * batch * width
+    mqa_bytes = layers * 2 * 1 * head_dim * seq * batch * width
+    if (mha_bytes, mqa_bytes) != (2**32, 2**27):
+        raise AssertionError((mha_bytes, mqa_bytes))
+    if mha_bytes != 4 * kv_bytes or kv_bytes != 8 * mqa_bytes:
+        raise AssertionError("MHA/GQA/MQA ratios")
+    # 滚动缓冲按窗口分配。前缀 2048 只写满一半，前缀 8192 覆写旧槽，分配长度都是 4096。
+    window = 4096
+    occupied = {2048: min(2048, window), 8192: min(8192, window)}
+    if occupied != {2048: 2048, 8192: 4096}:
+        raise AssertionError(occupied)
+    rolled = layers * 2 * kv_heads * head_dim * window * batch * width
+    if rolled != 2**31:
+        raise AssertionError(rolled)
+    weight_bytes = 2 * 4096**2
+    kv_one_layer = 2 * kv_heads * head_dim * 2048 * 1 * width
+    if (weight_bytes, kv_one_layer, weight_bytes // kv_one_layer) != (33_554_432, 8_388_608, 4):
+        raise AssertionError((weight_bytes, kv_one_layer))
+
+    # 方阵 d=4096，fp16。强度 = (S d) / (d + 2 S)。
+    d = 4096
+    decode_intensity = Fraction(1 * d, d + 2 * 1)
+    prefill_intensity = Fraction(2048 * d, d + 2 * 2048)
+    if decode_intensity != Fraction(2048, 2049) or prefill_intensity != 1024:
+        raise AssertionError((decode_intensity, prefill_intensity))
+    peak, bandwidth = 10**14, 2 * 10**12
+    ridge = peak // bandwidth
+    if ridge != 50:
+        raise AssertionError(ridge)
+    if not (decode_intensity < ridge < prefill_intensity):
+        raise AssertionError("roofline sides")
+    if bandwidth * 1 != 2 * 10**12 or Fraction(bandwidth, peak) != Fraction(1, 50):
+        raise AssertionError("bandwidth fraction")
+    exact_fraction = decode_intensity / ridge
+    if exact_fraction != Fraction(2048, 50 * 2049):
+        raise AssertionError(exact_fraction)
+    batch8 = Fraction(8 * d, d + 2 * 8)
+    if batch8 != Fraction(2048, 257) or not (batch8 < ridge):
+        raise AssertionError(batch8)
+    # 忽略激活时 fp16 强度等于批量，脊点 50 要求批量 50。
+    if Fraction(50) != ridge:
+        raise AssertionError("batch at the ridge")
+
+    # 注意力只计 KV 读。fp16 下强度约为 query 头 / KV 头。
+    if query_heads // kv_heads != 4:
+        raise AssertionError("attention intensity")
+    score_over_kv = Fraction(query_heads, 2 * kv_heads * head_dim)
+    if score_over_kv != Fraction(1, 64):
+        raise AssertionError(score_over_kv)
+
+    # 静态批的槽步，以及块大小 4 的分页。
+    useful, slots = 2 + 2 + 2 + 8, 4 * 8
+    if Fraction(useful, slots) != Fraction(7, 16) or slots - useful != 18:
+        raise AssertionError((useful, slots))
+    lengths = (5, 5, 6)
+    block = 4
+    blocks = sum((n + block - 1) // block for n in lengths)
+    paged_slots = blocks * block
+    # 5%4=1 浪费 3；6%4=2 浪费 2。整除的块没有内部碎片。
+    internal = sum(0 if n % block == 0 else block - n % block for n in lengths)
+    if (blocks, paged_slots, internal) != (6, 24, 8):
+        raise AssertionError((blocks, paged_slots, internal))
+    if 3 * 16 != 48 or 48 - sum(lengths) != 32:
+        raise AssertionError("contiguous reservation")
+
+    # 投机解码。α=4/5，γ=3，c=1/10。正中舍入不参与这条。
+    alpha = Fraction(4, 5)
+    gamma = 3
+    probs = []
+    for k in range(gamma):
+        probs.append(alpha**k * (1 - alpha))
+    probs.append(alpha**gamma)
+    if probs != [Fraction(1, 5), Fraction(4, 25), Fraction(16, 125), Fraction(64, 125)]:
+        raise AssertionError(probs)
+    if sum(probs) != 1:
+        raise AssertionError(sum(probs))
+    accepted = sum(k * p for k, p in enumerate(probs))
+    generated = accepted + 1
+    if accepted != Fraction(244, 125) or generated != Fraction(369, 125):
+        raise AssertionError((accepted, generated))
+    closed = (1 - alpha ** (gamma + 1)) / (1 - alpha)
+    if closed != generated:
+        raise AssertionError(closed)
+    cost = Fraction(1, 10)
+    speedup = generated / (gamma * cost + 1)
+    if speedup != Fraction(738, 325):
+        raise AssertionError(speedup)
+    if round(float(accepted), 4) != 1.9520:
+        raise AssertionError(round(float(accepted), 4))
+    if round(float(generated), 4) != 2.9520:
+        raise AssertionError(round(float(generated), 4))
+    if round(float(speedup), 4) != 2.2708:
+        raise AssertionError(round(float(speedup), 4))
+    if gamma + 1 != 4:
+        raise AssertionError("alpha = 1")
+    if (1 - Fraction(0)) / 1 != 1:
+        raise AssertionError("alpha = 0")
+
+    # 对称 int8 / int4，以及组大小 2 的后一组。
+    weights = (Fraction(2, 5), Fraction(-6, 5), Fraction(1, 5), Fraction(4, 5))
+    q8, scale8, err8 = symmetric_quantize(weights, 127)
+    if scale8 != Fraction(6, 635) or q8 != (42, -127, 21, 85):
+        raise AssertionError((q8, scale8))
+    if err8 != (Fraction(2, 635), 0, Fraction(1, 635), Fraction(-2, 635)):
+        raise AssertionError(err8)
+    if max(abs(e) for e in err8) != Fraction(2, 635):
+        raise AssertionError(max(err8))
+    if scale8 / 2 != Fraction(3, 635):
+        raise AssertionError("half step int8")
+    q4, scale4, err4 = symmetric_quantize(weights, 7)
+    if scale4 != Fraction(6, 35) or q4 != (2, -7, 1, 5):
+        raise AssertionError((q4, scale4))
+    if err4 != (Fraction(2, 35), 0, Fraction(1, 35), Fraction(-2, 35)):
+        raise AssertionError(err4)
+    if max(abs(e) for e in err4) != Fraction(2, 35):
+        raise AssertionError("int4")
+    if scale4 / scale8 != Fraction(127, 7):
+        raise AssertionError("step ratio")
+    group = weights[2:]
+    qg, scaleg, errg = symmetric_quantize(group, 127)
+    if scaleg != Fraction(4, 635) or qg != (32, 127):
+        raise AssertionError((qg, scaleg))
+    if errg != (Fraction(-1, 635), 0):
+        raise AssertionError(errg)
+
+    # 非对称 int8，铺满 [-127, 127]，整数跨度 254。权重 (0, 1, 5)。
+    asym = (Fraction(0), Fraction(1), Fraction(5))
+    span = 254
+    scale_a = (asym[-1] - asym[0]) / span
+    if scale_a != Fraction(5, 254):
+        raise AssertionError(scale_a)
+    q_a = tuple(round_half_away((w - asym[0]) / scale_a) - 127 for w in asym)
+    if q_a != (-127, -76, 127):
+        raise AssertionError(q_a)
+    restored = tuple(asym[0] + (q + 127) * scale_a for q in q_a)
+    if restored != (Fraction(0), Fraction(255, 254), Fraction(5)):
+        raise AssertionError(restored)
+    if Fraction(1) - restored[1] != Fraction(-1, 254):
+        raise AssertionError("asymmetric error")
+    q_s, scale_s, err_s = symmetric_quantize(asym, 127)
+    if scale_s != Fraction(5, 127) or q_s != (0, 25, 127):
+        raise AssertionError((q_s, scale_s))
+    if err_s[1] != Fraction(2, 127) or err_s[1] != Fraction(4, 254):
+        raise AssertionError(err_s)
+
+    if round_half_away(Fraction(1, 2)) != 1 or round_half_away(Fraction(-1, 2)) != -1:
+        raise AssertionError("ties")
+    if round_half_away(Fraction(127, 4)) != 32 or round_half_away(Fraction(127, 5)) != 25:
+        raise AssertionError("31.75 and 25.4")
+
+    # TTFT 200 ms，TPOT 25 ms，N = 9。排队时间为 0。
+    ttft, tpot, n_out = 200, 25, 9
+    e2e = ttft + (n_out - 1) * tpot
+    if e2e != 400 or ttft + n_out * tpot != 425:
+        raise AssertionError((e2e, ttft + n_out * tpot))
+    throughput = Fraction(n_out) / Fraction(e2e, 1000)
+    if throughput != Fraction(45, 2):
+        raise AssertionError(throughput)
+
+
 def main() -> None:
     check_softmax()
     check_perplexity()
@@ -1545,6 +1732,7 @@ def main() -> None:
     check_pretraining()
     check_alignment()
     check_evaluation()
+    check_inference()
     print("ok")
 
 
