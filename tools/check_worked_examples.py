@@ -833,6 +833,427 @@ def check_attention() -> None:
         raise AssertionError(residual)
 
 
+def heap_push(heap: list[int], value: int) -> None:
+    heap.append(value)
+    i = len(heap) - 1
+    while i > 0:
+        parent = (i - 1) // 2
+        if heap[parent] <= heap[i]:
+            break
+        heap[parent], heap[i] = heap[i], heap[parent]
+        i = parent
+
+
+def heap_pop(heap: list[int]) -> int:
+    if len(heap) == 1:
+        return heap.pop()
+    top = heap[0]
+    heap[0] = heap.pop()
+    i = 0
+    n = len(heap)
+    while True:
+        left, right = 2 * i + 1, 2 * i + 2
+        smallest = i
+        if left < n and heap[left] < heap[smallest]:
+            smallest = left
+        if right < n and heap[right] < heap[smallest]:
+            smallest = right
+        if smallest == i:
+            break
+        heap[i], heap[smallest] = heap[smallest], heap[i]
+        i = smallest
+    return top
+
+
+def two_sum(nums: list[int], target: int) -> tuple[int, int] | None:
+    seen: dict[int, int] = {}
+    for j, value in enumerate(nums):
+        i = seen.get(target - value)
+        if i is not None:
+            return i, j
+        seen[value] = j
+    return None
+
+
+def sorted_squares(nums: list[int]) -> list[int]:
+    left, right = 0, len(nums) - 1
+    out = [0] * len(nums)
+    for pos in range(len(nums) - 1, -1, -1):
+        if abs(nums[left]) >= abs(nums[right]):
+            out[pos] = nums[left] * nums[left]
+            left += 1
+        else:
+            out[pos] = nums[right] * nums[right]
+            right -= 1
+    return out
+
+
+def min_length_at_least(nums: list[int], target: int) -> int:
+    best = 0
+    left = 0
+    total = 0
+    for right, value in enumerate(nums):
+        total += value
+        while total >= target and left <= right:
+            length = right - left + 1
+            if best == 0 or length < best:
+                best = length
+            total -= nums[left]
+            left += 1
+    return best
+
+
+def count_subarrays_sum(nums: list[int], k: int) -> int:
+    seen = {0: 1}
+    prefix = 0
+    count = 0
+    for value in nums:
+        prefix += value
+        count += seen.get(prefix - k, 0)
+        seen[prefix] = seen.get(prefix, 0) + 1
+    return count
+
+
+def count_subarrays_sum_without_zero(nums: list[int], k: int) -> int:
+    seen: dict[int, int] = {}
+    prefix = 0
+    count = 0
+    for value in nums:
+        prefix += value
+        count += seen.get(prefix - k, 0)
+        seen[prefix] = seen.get(prefix, 0) + 1
+    return count
+
+
+def feasible_parts(nums: list[int], parts_limit: int, cap: int) -> bool:
+    parts = 1
+    total = 0
+    for value in nums:
+        if value > cap:
+            return False
+        if total + value > cap:
+            parts += 1
+            total = value
+        else:
+            total += value
+    return parts <= parts_limit
+
+
+def min_max_sum(nums: list[int], parts_limit: int) -> int:
+    lo, hi = max(nums), sum(nums)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if feasible_parts(nums, parts_limit, mid):
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+
+def min_max_sum_buggy(nums: list[int], parts_limit: int) -> int:
+    lo, hi = max(nums), sum(nums)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if feasible_parts(nums, parts_limit, mid):
+            hi = mid - 1
+        else:
+            lo = mid + 1
+    return lo
+
+
+def next_greater(nums: list[int]) -> list[int | None]:
+    answer: list[int | None] = [None] * len(nums)
+    stack: list[int] = []
+    for i, value in enumerate(nums):
+        while stack and nums[stack[-1]] < value:
+            answer[stack.pop()] = value
+        stack.append(i)
+    return answer
+
+
+def check_structures() -> None:
+    if two_sum([2, 7, 11, 15], 9) != (0, 1):
+        raise AssertionError("two sum hash")
+    if two_sum([3, 3], 6) != (0, 1):
+        raise AssertionError("two sum duplicate")
+    if two_sum([3], 6) is not None:
+        raise AssertionError("two sum self")
+    buckets = [[] for _ in range(3)]
+    for key in (3, 6, 9):
+        buckets[key % 3].append(key)
+    if buckets != [[3, 6, 9], [], []]:
+        raise AssertionError(buckets)
+
+    heap: list[int] = []
+    snapshots = []
+    for value in (4, 1, 3, 2):
+        heap_push(heap, value)
+        snapshots.append(list(heap))
+    if snapshots != [[4], [1, 4], [1, 4, 3], [1, 2, 3, 4]]:
+        raise AssertionError(snapshots)
+    popped = (heap_pop(heap), heap_pop(heap))
+    if popped != (1, 2) or heap != [3, 4]:
+        raise AssertionError((popped, heap))
+
+    top: list[int] = []
+    for value in (5, 1, 4, 2, 3):
+        if len(top) < 2:
+            heap_push(top, value)
+        elif value > top[0]:
+            heap_pop(top)
+            heap_push(top, value)
+    if sorted(top) != [4, 5]:
+        raise AssertionError(top)
+
+    if sorted_squares([-4, -1, 0, 3, 10]) != [0, 1, 9, 16, 100]:
+        raise AssertionError(sorted_squares([-4, -1, 0, 3, 10]))
+    if min_length_at_least([2, 3, 1, 2, 4, 3], 7) != 2:
+        raise AssertionError("window")
+    if count_subarrays_sum([1, 1, 1], 2) != 2:
+        raise AssertionError("prefix")
+    if count_subarrays_sum_without_zero([1, 1, 1], 2) != 1:
+        raise AssertionError("missing empty prefix")
+    prefix = [0]
+    for value in (1, 2, 3, 4):
+        prefix.append(prefix[-1] + value)
+    if prefix != [0, 1, 3, 6, 10] or prefix[4] - prefix[1] != 9:
+        raise AssertionError(prefix)
+
+    nums = [7, 2, 5, 10, 8]
+    if not feasible_parts(nums, 2, 18) or feasible_parts(nums, 2, 17):
+        raise AssertionError("cap 18/17")
+    if min_max_sum(nums, 2) != 18 or min_max_sum_buggy(nums, 2) != 17:
+        raise AssertionError((min_max_sum(nums, 2), min_max_sum_buggy(nums, 2)))
+    if min_max_sum(nums, 1) != 32 or min_max_sum(nums, 5) != 10:
+        raise AssertionError("edge splits")
+    if next_greater([2, 1, 2, 4, 3]) != [4, 2, 4, None, None]:
+        raise AssertionError(next_greater([2, 1, 2, 4, 3]))
+
+    data: list[int | None] = [None] * 4
+    head = tail = size = 0
+    cap = 4
+
+    def enqueue(value: int) -> None:
+        nonlocal tail, size
+        if size == cap:
+            raise AssertionError("full")
+        data[tail] = value
+        tail = (tail + 1) % cap
+        size += 1
+
+    def dequeue() -> int | None:
+        nonlocal head, size
+        value = data[head]
+        data[head] = None
+        head = (head + 1) % cap
+        size -= 1
+        return value
+
+    for value in (1, 2, 3):
+        enqueue(value)
+    if dequeue() != 1:
+        raise AssertionError("dequeue")
+    enqueue(4)
+    enqueue(5)
+    if (list(data), head, tail, size) != ([5, 2, 3, 4], 1, 1, 4):
+        raise AssertionError((data, head, tail, size))
+
+
+def check_activation_norm() -> None:
+    def sigmoid(value: float) -> float:
+        return 1.0 / (1.0 + math.exp(-value))
+
+    assert_close(sigmoid(0.0) * (1.0 - sigmoid(0.0)), 0.25)
+    assert_close(0.25**4, 1 / 256)
+    sigma5 = sigmoid(5.0)
+    deriv5 = sigma5 * (1.0 - sigma5)
+    assert_close(sigma5, 0.9933071490757153, tol=1e-12)
+    assert_close(deriv5, 0.006648056670790033, tol=1e-12)
+    assert_close(deriv5**4, 1.9533445339986894e-09, tol=1e-18)
+    assert_close(1.0 - math.tanh(2.0) ** 2, 0.07065082485316443, tol=1e-12)
+
+    silu2 = 2.0 * sigmoid(2.0)
+    assert_close(silu2, 1.7615941559557646, tol=1e-12)
+    gelu = 0.5 * 2.0 * (1.0 + math.erf(2.0 / math.sqrt(2.0)))
+    gelu_tanh = 0.5 * 2.0 * (
+        1.0 + math.tanh(math.sqrt(2.0 / math.pi) * (2.0 + 0.044715 * 8.0))
+    )
+    assert_close(gelu, 1.9544997361036416, tol=1e-12)
+    assert_close(gelu_tanh, 1.954597694087775, tol=1e-12)
+    if (round(gelu, 4), round(gelu_tanh, 4)) != (1.9545, 1.9546):
+        raise AssertionError((round(gelu, 4), round(gelu_tanh, 4)))
+
+    fan_in, fan_out = 4, 2
+    xavier = math.sqrt(6 / (fan_in + fan_out))
+    he = math.sqrt(6 / fan_in)
+    default = 1 / math.sqrt(fan_in)
+    assert_close(xavier, 1.0)
+    assert_close(he, math.sqrt(1.5))
+    assert_close(default, 0.5)
+    assert_close(xavier**2 / 3, 1 / 3)
+    assert_close(he**2 / 3, 0.5)
+    assert_close(default**2 / 3, 1 / 12)
+    # a = sqrt(5) leaky-ReLU gain collapses to the Linear default bound.
+    gain = math.sqrt(2 / (1 + 5))
+    assert_close(gain * math.sqrt(3 / fan_in), default)
+    second = 0.5 * fan_in * (1 / (3 * fan_in))
+    assert_close(second, 1 / 6)
+    assert_close(second**3, 1 / 216)
+
+    def layer_norm(values: tuple[float, ...]) -> tuple[float, ...]:
+        n = len(values)
+        mu = sum(values) / n
+        var = sum((v - mu) ** 2 for v in values) / n
+        scale = math.sqrt(var)
+        return tuple((v - mu) / scale for v in values)
+
+    def rms_norm(values: tuple[float, ...]) -> tuple[float, ...]:
+        rms = math.sqrt(sum(v * v for v in values) / len(values))
+        return tuple(v / rms for v in values)
+
+    ln = layer_norm((1.0, 3.0, 5.0))
+    root = math.sqrt(1.5)
+    assert_close(ln[0], -root)
+    assert_close(ln[1], 0.0)
+    assert_close(ln[2], root)
+    shifted = layer_norm((0.0, 2.0, 4.0))
+    for left, right in zip(ln, shifted):
+        assert_close(left, right)
+    assert_close(1.0 + 2.0 * root, 3.449489742783178, tol=1e-12)
+    rms = rms_norm((1.0, 3.0, 5.0))
+    scale = math.sqrt(35 / 3)
+    assert_close(scale, 3.415650255319866, tol=1e-12)
+    for value, coord in zip(rms, (1.0, 3.0, 5.0)):
+        assert_close(value, coord / scale)
+    if not (ln[0] < 0.0 < rms[0]):
+        raise AssertionError("LayerNorm and RMSNorm signs")
+
+    # BatchNorm over two samples, two features.
+    feat0 = (1.0, 3.0)
+    feat1 = (2.0, 6.0)
+    mean0 = sum(feat0) / 2
+    mean1 = sum(feat1) / 2
+    std0 = math.sqrt(sum((v - mean0) ** 2 for v in feat0) / 2)
+    std1 = math.sqrt(sum((v - mean1) ** 2 for v in feat1) / 2)
+    bn = (
+        ((feat0[0] - mean0) / std0, (feat1[0] - mean1) / std1),
+        ((feat0[1] - mean0) / std0, (feat1[1] - mean1) / std1),
+    )
+    if bn != ((-1.0, -1.0), (1.0, 1.0)):
+        raise AssertionError(bn)
+    for sample in ((1.0, 2.0), (3.0, 6.0)):
+        normalized = layer_norm(sample)
+        assert_close(normalized[0], -1.0)
+        assert_close(normalized[1], 1.0)
+
+    running = 0.0
+    running = 0.9 * running + 0.1 * 2.0
+    assert_close(running, 0.2)
+    running = 0.9 * running + 0.1 * 6.0
+    assert_close(running, 0.78)
+
+    pre = (1.0, 3.0, 5.0)
+    post = layer_norm(pre)
+    if sum(v * v for v in pre) != 35:
+        raise AssertionError("pre length")
+    assert_close(sum(v * v for v in post), 3.0)
+
+
+def check_pretraining() -> None:
+    token_nll = (math.log(8.0) + math.log(4.0)) / 4.0
+    seq_nll = (math.log(8.0) + math.log(4.0)) / 2.0
+    assert_close(token_nll, 1.25 * math.log(2.0))
+    assert_close(seq_nll, 2.5 * math.log(2.0))
+    assert_close(math.exp(token_nll), 2.0**1.25)
+    assert_close(math.exp(seq_nll), 2.0**2.5)
+    if round(token_nll, 4) != 0.8664 or round(math.exp(token_nll), 4) != 2.3784:
+        raise AssertionError((round(token_nll, 4), round(math.exp(token_nll), 4)))
+    if round(seq_nll, 4) != 1.7329 or round(math.exp(seq_nll), 4) != 5.6569:
+        raise AssertionError((round(seq_nll, 4), round(math.exp(seq_nll), 4)))
+
+    if Fraction(400, 1000) != Fraction(2, 5) or Fraction(100, 700) != Fraction(1, 7):
+        raise AssertionError("dedup weights")
+
+    def h1(value: int) -> int:
+        return value % 7
+
+    def h2(value: int) -> int:
+        return (2 * value) % 7
+
+    set_a = (1, 2, 3)
+    set_b = (1, 2, 4)
+    if min(h1(v) for v in set_a) != 1 or min(h1(v) for v in set_b) != 1:
+        raise AssertionError("h1")
+    if min(h2(v) for v in set_a) != 2 or min(h2(v) for v in set_b) != 1:
+        raise AssertionError("h2")
+    if Fraction(2, 4) != Fraction(1, 2):
+        raise AssertionError("jaccard")
+
+    mix = 0.5 * 0.1 + 0.5 * 0.02
+    assert_close(mix, 0.06)
+    assert_close(0.5 * 0.1, 0.05)
+
+    n_params = 10**8
+    n_tokens = 2 * 10**9
+    compute = 6 * n_params * n_tokens
+    if compute != 1_200_000_000_000_000_000:
+        raise AssertionError(compute)
+    if 2 * n_params * n_tokens * 3 != compute:
+        raise AssertionError("2ND is one third")
+    if compute // 10**14 != 12_000:
+        raise AssertionError("seconds")
+    if 2 * 10**5 * 10**4 != n_tokens:
+        raise AssertionError("tokens from steps")
+    if 6 * n_params * (2 * 10**5) != 120_000_000_000_000:
+        raise AssertionError("flops per step")
+
+    plan_a = compute // (6 * n_params)
+    plan_b_n = 4 * 10**8
+    plan_b = compute // (6 * plan_b_n)
+    if (plan_a, plan_b) != (2 * 10**9, 5 * 10**8):
+        raise AssertionError((plan_a, plan_b))
+    if Fraction(plan_b, plan_b_n) != Fraction(5, 4):
+        raise AssertionError("tokens per param")
+    if (14 * 10**11) // (70 * 10**9) != 20:
+        raise AssertionError("chinchilla ratio")
+
+    d_model, n_layer, seq = 512, 8, 1024
+    small_n = 12 * n_layer * d_model**2
+    if small_n != 25_165_824:
+        raise AssertionError(small_n)
+    if Fraction(seq, 6 * d_model) != Fraction(1, 3):
+        raise AssertionError("attention ratio")
+    if Fraction(seq, 12 * d_model) != Fraction(1, 6):
+        raise AssertionError("kaplan mask ratio")
+    forward_body = 2 * small_n
+    forward_out = 2 * 50_257 * d_model
+    if (forward_body, forward_out) != (50_331_648, 51_463_168):
+        raise AssertionError((forward_body, forward_out))
+    adjusted = compute // 3 * 4
+    if adjusted != 1_600_000_000_000_000_000:
+        raise AssertionError(adjusted)
+
+    wide_n = 12 * 80 * 8192**2
+    wide_body = 2 * wide_n
+    wide_out = 2 * 50_257 * 8192
+    if (wide_n, wide_body, wide_out) != (64_424_509_440, 128_849_018_880, 823_410_688):
+        raise AssertionError((wide_n, wide_body, wide_out))
+    ratio = wide_out / wide_body
+    if round(ratio, 6) != 0.006391:
+        raise AssertionError(round(ratio, 6))
+
+    val = (3.55, 3.10, 3.05, 3.20)
+    if val.index(min(val)) != 2:
+        raise AssertionError("best checkpoint is step 400")
+    assert_close(math.exp(3.05), 21.11534442254061, tol=1e-12)
+    assert_close(math.exp(3.20), 24.532530197109352, tol=1e-12)
+    if (round(math.exp(3.05), 4), round(math.exp(3.20), 4)) != (21.1153, 24.5325):
+        raise AssertionError("perplexity table")
+    if 400 * 2 * 10**5 != 8 * 10**7:
+        raise AssertionError("tokens at step 400")
+    assert_close(math.exp(0.05), 1.051271096376024, tol=1e-12)
+
+
 def main() -> None:
     check_softmax()
     check_perplexity()
@@ -848,6 +1269,9 @@ def main() -> None:
     check_probability()
     check_optimizer()
     check_attention()
+    check_structures()
+    check_activation_norm()
+    check_pretraining()
     print("ok")
 
 
