@@ -2504,6 +2504,186 @@ def check_statistics() -> None:
         raise AssertionError("learning rate scales duplicated variance")
 
 
+def gpipe_idle_slots(stages: int, microbatches: int) -> tuple[int, ...]:
+    """GPipe：先全部前向，再全部反向。前向和反向各占 1 拍，阶段工作量相同。"""
+    occupied = [set() for _ in range(stages)]
+    for micro in range(microbatches):
+        for stage in range(stages):
+            occupied[stage].add(stage + micro)
+    backward_start = microbatches + stages - 1
+    for step in range(microbatches):
+        for stage in range(stages):
+            occupied[stage].add(backward_start + (stages - 1 - stage) + step)
+    wall = 2 * (microbatches + stages - 1)
+    return tuple(sum(1 for t in range(wall) if t not in busy) for busy in occupied)
+
+
+def check_distributed() -> None:
+    # 两个 worker，本地对样本取平均，再对 worker 取平均。
+    local = ((6 + 2) / 2, (0 + -4) / 2)
+    if local != (4, -2):
+        raise AssertionError(local)
+    averaged = (local[0] + local[1]) / 2
+    if averaged != 1 or (6 + 2 + 0 + -4) / 4 != 1:
+        raise AssertionError(averaged)
+    if local[0] + local[1] != 2:
+        raise AssertionError("sum of local means")
+    summed = ((6 + 2) + (0 + -4)) / 2
+    if summed != 2 or (6 + 2 + 0 + -4) != 4 or 4 / summed != 2:
+        raise AssertionError(summed)
+
+    per_worker, workers, steps = 32, 4, 1000
+    tokens_dp = workers * per_worker * steps
+    tokens_one = per_worker * steps
+    if (tokens_dp, tokens_one, tokens_dp // per_worker) != (128_000, 32_000, 4_000):
+        raise AssertionError((tokens_dp, tokens_one))
+    if Fraction(tokens_one, tokens_dp) != Fraction(1, 4):
+        raise AssertionError("token ratio")
+    microbatches = 4
+    if workers * microbatches * per_worker != 512 or microbatches * per_worker != 128:
+        raise AssertionError("effective batch")
+
+    lr = Fraction(1, 10)
+    if 0 - lr * 1 != Fraction(-1, 10) or 0 - lr * 2 != Fraction(-1, 5):
+        raise AssertionError("learning-rate scale")
+
+    # 混合精度 Adam：fp16 参数、fp16 梯度、fp32 副本和两份矩。
+    psi = 2**20
+    nd = 4
+    if 2 + 2 + 4 + 4 + 4 != 16:
+        raise AssertionError("bytes per parameter")
+    naive = 16 * psi
+    zero1 = 4 * psi + (12 * psi) // nd
+    zero2 = 2 * psi + (14 * psi) // nd
+    zero3 = (16 * psi) // nd
+    if (naive, zero1, zero2, zero3) != (16_777_216, 7_340_032, 5_767_168, 4_194_304):
+        raise AssertionError((naive, zero1, zero2, zero3))
+    if (naive, zero1, zero3) != (2**24, 7 * 2**20, 2**22):
+        raise AssertionError("powers of two")
+    if zero2 != Fraction(11, 2) * psi:
+        raise AssertionError(zero2)
+    ratios = (Fraction(naive, zero1), Fraction(naive, zero2), Fraction(naive, zero3))
+    if ratios != (Fraction(16, 7), Fraction(32, 11), 4):
+        raise AssertionError(ratios)
+    if not (ratios[0] < 4 and ratios[1] < 8):
+        raise AssertionError("finite Nd is below the large-Nd limits")
+    layer = 2 * psi // 4
+    if layer != 2**19 or layer != 524_288:
+        raise AssertionError(layer)
+    # 论文的 1.5B 模型：16 字节是 24 GB，fp32 缓冲是 6 GB，都按 10^9 字节。
+    if 15 * 10**8 * 16 != 24 * 10**9 or 4 * 15 * 10**8 != 6 * 10**9:
+        raise AssertionError("paper byte counts")
+
+    def matvec(weight: tuple[tuple[int, ...], ...], vector: tuple[int, ...]) -> tuple[int, ...]:
+        # y = x @ W.T，W 的每一行是一个输出通道。
+        return tuple(sum(x * w for x, w in zip(vector, row)) for row in weight)
+
+    x = (1, 2, 3, 4)
+    w1 = (
+        (1, 0, 0, 0),
+        (0, 1, 0, 0),
+        (1, 1, 0, 0),
+        (0, 0, 1, 1),
+    )
+    full_y = matvec(w1, x)
+    shard_y = (matvec(w1[:2], x), matvec(w1[2:], x))
+    if full_y != (1, 2, 3, 7) or shard_y != ((1, 2), (3, 7)):
+        raise AssertionError((full_y, shard_y))
+    if shard_y[0] + shard_y[1] != full_y:
+        raise AssertionError("column shards concatenate")
+
+    w2 = (
+        (1, 2, 3, 4),
+        (0, 1, 0, 1),
+    )
+    full_z = matvec(w2, full_y)
+    partials = (
+        matvec(tuple(row[:2] for row in w2), full_y[:2]),
+        matvec(tuple(row[2:] for row in w2), full_y[2:]),
+    )
+    reduced = tuple(a + b for a, b in zip(*partials))
+    if full_z != (42, 9) or partials != ((5, 2), (37, 7)) or reduced != full_z:
+        raise AssertionError((full_z, partials, reduced))
+    bias = (1, 1)
+    once = tuple(z + b for z, b in zip(reduced, bias))
+    twice = tuple(a + b + 2 * c for a, b, c in zip(*partials, bias))
+    if once != (43, 10) or twice != (44, 11):
+        raise AssertionError((once, twice))
+    if tuple(t - o for t, o in zip(twice, once)) != bias:
+        raise AssertionError("extra bias")
+
+    grad_y = (1, 1, 1, 1)
+    # 列切分的反向：每个 rank 用自己的输出梯度和权重行，对输入梯度求和。
+    def input_grad(rows: tuple[tuple[int, ...], ...], grad_out: tuple[int, ...]) -> tuple[int, ...]:
+        width = len(rows[0])
+        return tuple(sum(grad_out[i] * rows[i][j] for i in range(len(rows))) for j in range(width))
+
+    parts = (input_grad(w1[:2], grad_y[:2]), input_grad(w1[2:], grad_y[2:]))
+    grad_x = tuple(a + b for a, b in zip(*parts))
+    if parts != ((1, 1, 0, 0), (1, 1, 1, 1)) or grad_x != (2, 2, 1, 1):
+        raise AssertionError((parts, grad_x))
+    if grad_x != input_grad(w1, grad_y):
+        raise AssertionError("backward all-reduce")
+
+    stages, micros = 4, 4
+    idle = gpipe_idle_slots(stages, micros)
+    wall = 2 * (micros + stages - 1)
+    useful = 2 * micros
+    if idle != (6, 6, 6, 6) or wall != 14 or useful != 8:
+        raise AssertionError((idle, wall, useful))
+    if Fraction(idle[0], wall) != Fraction(3, 7):
+        raise AssertionError("bubble over wall")
+    if Fraction(useful, wall) != Fraction(4, 7):
+        raise AssertionError("efficiency")
+    if Fraction(idle[0], useful) != Fraction(3, 4):
+        raise AssertionError("bubble over useful")
+    if Fraction(stages - 1, micros + stages - 1) != Fraction(3, 7):
+        raise AssertionError("closed form")
+    # 反向每拍按前向的 2 倍计，比例不变。
+    duration_wall = 3 * (micros + stages - 1)
+    duration_useful = 3 * micros
+    if (duration_wall, duration_useful, duration_wall - duration_useful) != (21, 12, 9):
+        raise AssertionError("weighted slots")
+    if Fraction(9, 21) != Fraction(3, 7):
+        raise AssertionError("weighted bubble")
+    if Fraction(stages - 1, 16 + stages - 1) != Fraction(3, 19):
+        raise AssertionError("sixteen microbatches")
+    if Fraction(16, 16 + stages - 1) != Fraction(16, 19):
+        raise AssertionError("efficiency at M = 4K")
+    if Fraction(stages - 1, 1 + stages - 1) != Fraction(3, 4):
+        raise AssertionError("single microbatch")
+    if gpipe_idle_slots(stages, 1) != (6, 6, 6, 6):
+        raise AssertionError(gpipe_idle_slots(stages, 1))
+    if Fraction(1 + 3 + 5 + 7, 4) != 4 or (1 + 3 + 5 + 7) != 16:
+        raise AssertionError("microbatch mean")
+
+    factor = Fraction(nd - 1, nd)
+    if factor != Fraction(3, 4):
+        raise AssertionError(factor)
+    dp_elements = 2 * psi * factor
+    dp_bytes = 2 * dp_elements
+    if (dp_elements, dp_bytes) != (1_572_864, 3_145_728):
+        raise AssertionError((dp_elements, dp_bytes))
+    zero2_elements = 2 * (psi * factor)
+    if zero2_elements != dp_elements:
+        raise AssertionError(zero2_elements)
+    one_gather = psi * factor
+    zero3_elements = 3 * one_gather
+    zero3_bytes = 2 * zero3_elements
+    if (one_gather, zero3_elements, zero3_bytes) != (786_432, 2_359_296, 4_718_592):
+        raise AssertionError((one_gather, zero3_elements, zero3_bytes))
+    if Fraction(zero3_elements, dp_elements) != Fraction(3, 2):
+        raise AssertionError("ZeRO-3 ratio")
+    message = 64 * 256
+    tp_elements = 2 * message * Fraction(1, 2)
+    if (message, tp_elements, 2 * tp_elements) != (16_384, 16_384, 32_768):
+        raise AssertionError((message, tp_elements))
+    if dp_elements / tp_elements != 96:
+        raise AssertionError(dp_elements / tp_elements)
+    if 4 * message != 65_536 or 2 * 4 * message != 131_072:
+        raise AssertionError("four all-reduces")
+
+
 def main() -> None:
     check_softmax()
     check_perplexity()
@@ -2529,6 +2709,7 @@ def main() -> None:
     check_evaluation()
     check_rag()
     check_inference()
+    check_distributed()
     print("ok")
 
 
