@@ -1365,6 +1365,166 @@ def check_alignment() -> None:
     assert_close(renorm_margin, margin)
 
 
+def longest_shared_run(left: tuple[str, ...], right: tuple[str, ...]) -> int:
+    best = 0
+    for i in range(len(left)):
+        for j in range(len(right)):
+            length = 0
+            while (
+                i + length < len(left)
+                and j + length < len(right)
+                and left[i + length] == right[j + length]
+            ):
+                length += 1
+            if length > best:
+                best = length
+    return best
+
+
+def pass_at_k(n: int, c: int, k: int) -> float:
+    """Chen 等的无偏估计：1 - C(n-c, k) / C(n, k)。"""
+    if n - c < k:
+        return 1.0
+    fail = 1.0
+    for i in range(n - c + 1, n + 1):
+        fail *= 1.0 - k / i
+    return 1.0 - fail
+
+
+def check_evaluation() -> None:
+    # 参考续写的困惑度，和「另一种写法也算对」的任务成功。
+    model_a = (0.5, 0.1, 0.4)
+    model_b = (0.25, 0.6, 0.15)
+    if sum(model_a) != 1 or sum(model_b) != 1:
+        raise AssertionError("probabilities")
+    assert_close(math.exp(-math.log(model_a[0])), 2.0)
+    assert_close(math.exp(-math.log(model_b[0])), 4.0)
+    if (round(-math.log(model_a[0]), 4), round(-math.log(model_b[0]), 4)) != (0.6931, 1.3863):
+        raise AssertionError("reference nll")
+    if (model_a[0] + model_a[1], model_b[0] + model_b[1]) != (0.6, 0.85):
+        raise AssertionError("task success")
+
+    sum_correct = 2 * math.log(0.5)
+    sum_wrong = math.log(0.4)
+    mean_correct = sum_correct / 2
+    if (round(sum_correct, 4), round(sum_wrong, 4)) != (-1.3863, -0.9163):
+        raise AssertionError("logprob sums")
+    if (round(mean_correct, 4), round(sum_wrong, 4)) != (-0.6931, -0.9163):
+        raise AssertionError("logprob means")
+    if not (sum_wrong > sum_correct and mean_correct > sum_wrong):
+        raise AssertionError("length changes the winner")
+
+    assert_close(pass_at_k(5, 2, 2), 0.7)
+    if Fraction(math.comb(3, 2), math.comb(5, 2)) != Fraction(3, 10):
+        raise AssertionError("binomial ratio")
+    product = (1 - Fraction(2, 4)) * (1 - Fraction(2, 5))
+    if product != Fraction(3, 10):
+        raise AssertionError(product)
+    plugin = 1 - (1 - Fraction(2, 5)) ** 2
+    if plugin != Fraction(16, 25):
+        raise AssertionError(plugin)
+    if pass_at_k(5, 4, 2) != 1.0:
+        raise AssertionError("all but one correct")
+    if 1 - (Fraction(1, 5)) ** 2 != Fraction(24, 25):
+        raise AssertionError("plugin when c=4")
+    assert_close(pass_at_k(5, 2, 1), 0.4)
+    # 连乘和组合数在另一组上也相同。
+    n, c, k = 10, 3, 4
+    assert_close(pass_at_k(n, c, k), 1 - math.comb(n - c, k) / math.comb(n, k))
+
+    reference = {"猫": 1, "在": 1, "垫子": 1}
+    candidate = ("猫", "猫", "猫", "在")
+    raw = sum(1 for token in candidate if token in reference)
+    clipped = 0
+    used: dict[str, int] = {}
+    for token in candidate:
+        if used.get(token, 0) < reference.get(token, 0):
+            clipped += 1
+            used[token] = used.get(token, 0) + 1
+    if (raw, clipped) != (4, 2):
+        raise AssertionError((raw, clipped))
+    if Fraction(clipped, len(candidate)) != Fraction(1, 2):
+        raise AssertionError("clipped precision")
+
+    if (65 + 45) / 2 / 100 != 0.55 or 65 / 100 != 0.65:
+        raise AssertionError("position protocol")
+
+    k_elo = 32
+    expected = 1 / 2
+    rating_a = 1000 + k_elo * (1 - expected)
+    rating_b = 1000 + k_elo * (0 - expected)
+    if (rating_a, rating_b) != (1016, 984):
+        raise AssertionError((rating_a, rating_b))
+    gap = 1 / (1 + 10 ** ((1000 - 1400) / 400))
+    assert_close(gap, 10 / 11)
+    if round(gap, 4) != 0.9091:
+        raise AssertionError(round(gap, 4))
+    assert_close(1 / (1 + math.exp(-math.log(10))), 10 / 11)
+    if round(math.log(10), 4) != 2.3026:
+        raise AssertionError(round(math.log(10), 4))
+
+    train = ("报道", "泰坦尼克", "的", "船长", "是", "谁", "的", "新闻")
+    exact = ("泰坦尼克", "的", "船长", "是", "谁")
+    paraphrase = ("沉船", "的", "船长", "叫", "什么")
+    if longest_shared_run(exact, train) != 5:
+        raise AssertionError("five-gram")
+    if longest_shared_run(paraphrase, train) != 2:
+        raise AssertionError("paraphrase overlap")
+
+    def exposure(num_canaries: int, rank: int) -> float:
+        return math.log2(num_canaries) - math.log2(rank)
+
+    if (exposure(1024, 1), exposure(1024, 512)) != (10, 1):
+        raise AssertionError("canary exposure")
+
+    p_hat = 80 / 100
+    se = math.sqrt(p_hat * (1 - p_hat) / 100)
+    assert_close(se, 0.04)
+    half = 1.96 * se
+    assert_close(half, 0.0784)
+    if (round(p_hat - half, 4), round(p_hat + half, 4)) != (0.7216, 0.8784):
+        raise AssertionError("wald interval")
+
+    only_a, only_b, both, neither = 10, 5, 70, 15
+    if only_a + only_b + both + neither != 100:
+        raise AssertionError("paired counts")
+    if (both + only_a, both + only_b) != (80, 75):
+        raise AssertionError("accuracies")
+    diff = (only_a - only_b) / 100
+    var_d = (only_a + only_b) / 100 - diff**2
+    assert_close(var_d, 0.1475)
+    se_paired = math.sqrt(var_d / 100)
+    if round(se_paired, 4) != 0.0384 or round(1.96 * se_paired, 4) != 0.0753:
+        raise AssertionError((round(se_paired, 4), round(1.96 * se_paired, 4)))
+    if (round(diff - 1.96 * se_paired, 4), round(diff + 1.96 * se_paired, 4)) != (-0.0253, 0.1253):
+        raise AssertionError("paired interval")
+    cov = both / 100 - 0.8 * 0.75
+    assert_close(cov, 0.10)
+    var_check = 0.8 * 0.2 + 0.75 * 0.25 - 2 * cov
+    assert_close(var_check, var_d)
+    se_independent = math.sqrt(0.04**2 + 0.75 * 0.25 / 100)
+    assert_close(se_independent, math.sqrt(0.003475))
+    if round(se_independent, 4) != 0.0589:
+        raise AssertionError(round(se_independent, 4))
+
+    for n_items, below in ((384, False), (385, True)):
+        width = 0.98 / math.sqrt(n_items)
+        if (width <= 0.05) != below:
+            raise AssertionError((n_items, width))
+    if (round(0.98 / math.sqrt(384), 5), round(0.98 / math.sqrt(385), 5)) != (0.05001, 0.04995):
+        raise AssertionError("sample size widths")
+
+    se_phone = math.sqrt(0.6 * 0.4 / 40)
+    half_phone = 1.96 * se_phone
+    if (round(se_phone, 5), round(half_phone, 5)) != (0.07746, 0.15182):
+        raise AssertionError((round(se_phone, 5), round(half_phone, 5)))
+    if (round(0.6 - half_phone, 4), round(0.6 + half_phone, 4)) != (0.4482, 0.7518):
+        raise AssertionError("phone interval")
+    if round(1.96 * round(se_phone, 4), 4) != 0.1519:
+        raise AssertionError("rounding the standard error first")
+    assert_close(math.sqrt(1.0 * 0.0 / 40), 0.0)
+
+
 def main() -> None:
     check_softmax()
     check_perplexity()
@@ -1384,6 +1544,7 @@ def main() -> None:
     check_activation_norm()
     check_pretraining()
     check_alignment()
+    check_evaluation()
     print("ok")
 
 
