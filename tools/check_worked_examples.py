@@ -1254,6 +1254,117 @@ def check_pretraining() -> None:
     assert_close(math.exp(0.05), 1.051271096376024, tol=1e-12)
 
 
+def check_alignment() -> None:
+    def sigmoid(value: float) -> float:
+        return 1.0 / (1.0 + math.exp(-value))
+
+    answer = (-math.log(0.4) - math.log(0.8)) / 2.0
+    mixed = (-math.log(0.9) + answer * 2.0) / 3.0
+    if (round(answer, 4), round(mixed, 4), round(-math.log(0.9), 4)) != (0.5697, 0.4149, 0.1054):
+        raise AssertionError((round(answer, 4), round(mixed, 4), round(-math.log(0.9), 4)))
+
+    for reward_w, reward_l in ((1.0, -1.0), (6.0, 4.0)):
+        gap = reward_w - reward_l
+        if gap != 2.0:
+            raise AssertionError(gap)
+        assert_close(sigmoid(gap), 1.0 / (1.0 + math.exp(-2.0)))
+    if (round(sigmoid(2.0), 4), round(-math.log(sigmoid(2.0)), 4)) != (0.8808, 0.1269):
+        raise AssertionError("sigma(2)")
+    if (round(sigmoid(-2.0), 4), round(-math.log(sigmoid(-2.0)), 4)) != (0.1192, 2.1269):
+        raise AssertionError("sigma(-2)")
+    assert_close(-math.log(sigmoid(-2.0)), 2.0 - math.log(sigmoid(2.0)))
+
+    delta = math.log(3.0)
+    assert_close(sigmoid(delta), 0.75, tol=1e-12)
+    if round(delta, 4) != 1.0986:
+        raise AssertionError(round(delta, 4))
+    pair_sum = -(3 * math.log(0.75) + math.log(0.25))
+    if (round(pair_sum, 4), round(pair_sum / 4.0, 4)) != (2.2493, 0.5623):
+        raise AssertionError((round(pair_sum, 4), round(pair_sum / 4.0, 4)))
+    for value in (-2.0, 0.0, 2.0, 10.0):
+        if 4.0 * sigmoid(-value) <= 0.0:
+            raise AssertionError("unanimous preference likelihood still increases")
+    # Uniform reference, reward gap ln 3: the shared 1/2 cancels, refusal gets 3/4.
+    weights = (Fraction(1, 2) * 3, Fraction(1, 2))
+    if weights[0] / sum(weights) != Fraction(3, 4):
+        raise AssertionError(weights)
+
+    pi_hack, pi_good = sigmoid(2.0), sigmoid(-2.0)
+    assert_close(pi_hack + pi_good, 1.0)
+    proxy = 1.0 + 2.0 * pi_hack
+    kl = math.log(2.0) + pi_hack * math.log(pi_hack) + pi_good * math.log(pi_good)
+    objective = proxy - kl
+    point = 3.0 - math.log(2.0)
+    if (round(pi_hack, 4), round(proxy, 4), round(pi_good, 4)) != (0.8808, 2.7616, 0.1192):
+        raise AssertionError((round(pi_hack, 4), round(proxy, 4), round(pi_good, 4)))
+    if (round(kl, 4), round(objective, 4), round(point, 4)) != (0.3278, 2.4338, 2.3069):
+        raise AssertionError((round(kl, 4), round(objective, 4), round(point, 4)))
+    if not point < objective:
+        raise AssertionError("point mass should score below the optimum")
+
+    pi_hack_4 = sigmoid(0.5)
+    if (round(pi_hack_4, 4), round(1.0 - pi_hack_4, 4), round(1.0 + 2.0 * pi_hack_4, 4)) != (
+        0.6225,
+        0.3775,
+        2.2449,
+    ):
+        raise AssertionError("beta 4")
+
+    def clipped(rho: float, advantage: float, eps: float = 0.2) -> float:
+        ratio = min(max(rho, 1.0 - eps), 1.0 + eps)
+        return min(rho * advantage, ratio * advantage)
+
+    if (clipped(1.5, 1.0), clipped(0.5, 1.0), clipped(1.5, -1.0), clipped(0.5, -1.0)) != (
+        1.2,
+        0.5,
+        -1.5,
+        -0.8,
+    ):
+        raise AssertionError("ppo clip")
+    if (round(math.exp(0.1), 4), round(math.exp(1.5), 4)) != (1.1052, 4.4817):
+        raise AssertionError("policy ratios")
+    if not 0.8 < math.exp(0.1) < 1.2:
+        raise AssertionError("exp(0.1) should sit inside the clip interval")
+    assert_close(2.0 - 0.1 * ((-1.0) - (-8.0)), 1.3)
+    assert_close(2.0 - 0.2 * 7.0, 0.6)
+
+    logp_w = -0.5 + -0.5
+    logp_l = -1.5 + -2.5
+    logp_ref_w = -1.0 + -1.0
+    logp_ref_l = -1.0 + -2.0
+    if (logp_w, logp_l, logp_ref_w, logp_ref_l) != (-1.0, -4.0, -2.0, -3.0):
+        raise AssertionError((logp_w, logp_l, logp_ref_w, logp_ref_l))
+    margin = (logp_w - logp_ref_w) - (logp_l - logp_ref_l)
+    if margin != 2.0:
+        raise AssertionError(margin)
+    if (
+        round(sigmoid(margin), 4),
+        round(-math.log(sigmoid(margin)), 4),
+        round(sigmoid(-margin), 4),
+    ) != (0.8808, 0.1269, 0.1192):
+        raise AssertionError("dpo pair")
+    if 0.5 * margin != 1.0:
+        raise AssertionError("beta 0.5")
+    mean_margin = ((-0.5) - (-1.0)) - ((-2.0) - (-1.5))
+    if mean_margin != 1.0:
+        raise AssertionError(mean_margin)
+    if (round(sigmoid(1.0), 4), round(-math.log(sigmoid(1.0)), 4)) != (0.7311, 0.3133):
+        raise AssertionError("sigma(1)")
+    if logp_w - logp_l != 3.0:
+        raise AssertionError("dropped reference")
+    if (round(sigmoid(3.0), 4), round(-math.log(sigmoid(3.0)), 4)) != (0.9526, 0.0486):
+        raise AssertionError("sigma(3)")
+    reversed_margin = ((-3.0) - logp_ref_w) - ((-2.0) - logp_ref_l)
+    if reversed_margin != -2.0:
+        raise AssertionError(reversed_margin)
+    # Renormalizing the two policy sequences adds one constant and cancels.
+    total = math.exp(logp_w) + math.exp(logp_l)
+    renorm_margin = (math.log(math.exp(logp_w) / total) - logp_ref_w) - (
+        math.log(math.exp(logp_l) / total) - logp_ref_l
+    )
+    assert_close(renorm_margin, margin)
+
+
 def main() -> None:
     check_softmax()
     check_perplexity()
@@ -1272,6 +1383,7 @@ def main() -> None:
     check_structures()
     check_activation_norm()
     check_pretraining()
+    check_alignment()
     print("ok")
 
 
