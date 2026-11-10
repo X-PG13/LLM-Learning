@@ -2250,6 +2250,104 @@ def check_generalization() -> None:
         raise AssertionError("irreducible second moment")
 
 
+def check_minimal_experiment() -> None:
+    # 大设定沿用预训练笔记。小核对把 N 和 D 各缩小 100 倍。
+    big = 6 * 10**8 * 2 * 10**9
+    small = 6 * 10**6 * 2 * 10**7
+    if (big, small) != (1_200_000_000_000_000_000, 120_000_000_000_000):
+        raise AssertionError((big, small))
+    if big // small != 10_000:
+        raise AssertionError(big // small)
+    if Fraction(small, 10**14) != Fraction(6, 5):
+        raise AssertionError("1.2 seconds")
+    if (10**8) // (10**6) != 100 or (2 * 10**9) // (2 * 10**7) != 100:
+        raise AssertionError("param and data ratios")
+
+    # d = 64，两层，S = 256，V = 512。注意力占 2/3，输出投影占 1/3，合计是 6ND 的 2 倍。
+    d_model, n_layer, seq, vocab, tokens = 64, 2, 256, 512, 10**7
+    n_params = 12 * n_layer * d_model**2
+    if n_params != 98_304:
+        raise AssertionError(n_params)
+    if Fraction(seq, 6 * d_model) != Fraction(2, 3):
+        raise AssertionError("attention ratio")
+    if Fraction(vocab * d_model, n_params) != Fraction(1, 3):
+        raise AssertionError("output ratio")
+    body = 6 * n_params * tokens
+    with_attention = body * 5 // 3
+    output = body // 3
+    total = with_attention + output
+    if (body, with_attention, output, total) != (
+        5_898_240_000_000,
+        9_830_400_000_000,
+        1_966_080_000_000,
+        11_796_480_000_000,
+    ):
+        raise AssertionError((body, with_attention, output, total))
+    if total != body * 2 or Fraction(1) + Fraction(2, 3) + Fraction(1, 3) != 2:
+        raise AssertionError("body plus attention plus output")
+
+    baseline = (1, 0, 1, 0, 0, 1, 0, 1, 0, 1)
+    changed = (1, 1, 1, 0, 1, 1, 0, 0, 1, 1)
+    if (sum(baseline), sum(changed), sum(changed) - sum(baseline)) != (5, 7, 2):
+        raise AssertionError("correct counts")
+    if not sum(changed) - sum(baseline) < 3:
+        raise AssertionError("a lead of 2 does not meet +3")
+    both = only_changed = only_baseline = neither = 0
+    for left, right in zip(baseline, changed):
+        if left and right:
+            both += 1
+        elif right:
+            only_changed += 1
+        elif left:
+            only_baseline += 1
+        else:
+            neither += 1
+    if (both, only_changed, only_baseline, neither) != (4, 3, 1, 2):
+        raise AssertionError((both, only_changed, only_baseline, neither))
+    # 第 2 题和第 5 题是只改动对的两格。改成错之后两边都是 5。
+    if (changed[1], changed[4]) != (1, 1) or (baseline[1], baseline[4]) != (0, 0):
+        raise AssertionError("items 2 and 5")
+    if sum(changed) - 2 != sum(baseline):
+        raise AssertionError("flipping two cells ties the table")
+
+    diff = Fraction(only_changed - only_baseline, 10)
+    second = Fraction(only_changed + only_baseline, 10)
+    var = second - diff**2
+    if (diff, second, var) != (Fraction(1, 5), Fraction(2, 5), Fraction(9, 25)):
+        raise AssertionError((diff, second, var))
+    se = math.sqrt(float(var) / 10)
+    half = 1.96 * se
+    if (round(se, 4), round(half, 4), round(float(diff) - half, 4), round(float(diff) + half, 4)) != (
+        0.1897,
+        0.3719,
+        -0.1719,
+        0.5719,
+    ):
+        raise AssertionError((round(se, 4), round(half, 4)))
+    if not (float(diff) - half < 0 < float(diff) + half):
+        raise AssertionError("paired interval should contain 0")
+
+    # 四格是为了拆差而设的整数：只换部件 3，只换数据 2，两样都换 8，叠在一起多出来 3。
+    only_component = 9 - 6
+    only_data = 8 - 6
+    joint = 14 - 6
+    leftover = joint - (only_component + only_data)
+    if (only_component, only_data, joint, leftover) != (3, 2, 8, 3):
+        raise AssertionError((only_component, only_data, joint, leftover))
+
+    if Fraction(1, 2) ** 4 != Fraction(1, 16):
+        raise AssertionError("four independent misses")
+    if 1 - Fraction(1, 2) ** 4 != Fraction(15, 16):
+        raise AssertionError("at least one of four trials")
+
+    contaminated = Fraction(3 + 2, 10)
+    clean = Fraction(2, 7)
+    if contaminated != Fraction(1, 2) or not clean < Fraction(1, 2):
+        raise AssertionError((contaminated, clean))
+    if round(float(clean), 4) != 0.2857:
+        raise AssertionError(round(float(clean), 4))
+
+
 def main() -> None:
     check_softmax()
     check_perplexity()
@@ -2269,6 +2367,7 @@ def main() -> None:
     check_structures()
     check_activation_norm()
     check_pretraining()
+    check_minimal_experiment()
     check_alignment()
     check_evaluation()
     check_rag()
