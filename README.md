@@ -1,6 +1,6 @@
 # LLM-Learning
 
-这是一份算法工程师课程，覆盖数学基础、编程与算法、经典机器学习、深度学习、大语言模型和系统工程，以及读论文的方法。正文以简体中文写成；Transformer、attention、softmax、token、PPO、DPO、RAG 使用通常的英文名字。
+这是一份算法工程师课程，覆盖数学基础、编程与算法、经典机器学习、深度学习、大语言模型和系统工程，以及读论文的方法。正文以简体中文写成。Transformer、attention、softmax、token、PPO、DPO、RAG 使用通常的英文名字。
 
 ## 目录
 
