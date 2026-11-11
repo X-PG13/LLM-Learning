@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import math
+import struct
 from collections import Counter
 from fractions import Fraction
 
@@ -2684,6 +2685,233 @@ def check_distributed() -> None:
         raise AssertionError("four all-reduces")
 
 
+def gap_at_one() -> tuple[bool, bool]:
+    lost = (1.0 + 2.0**-53) == 1.0
+    kept = (1.0 + 2.0**-52) == 1.0
+    return lost, kept
+
+
+def f32(value: float) -> float:
+    return struct.unpack("f", struct.pack("f", float(value)))[0]
+
+
+def add32(left: float, right: float) -> float:
+    return f32(f32(left) + f32(right))
+
+
+def sum_left(values: list[float]) -> float:
+    total = 0.0
+    for value in values:
+        total += value
+    return total
+
+
+def sum_tenths() -> float:
+    total = 0.0
+    for _ in range(10):
+        total += 0.1
+    return total
+
+
+def almost_equal(left: float, right: float, atol: float, rtol: float) -> bool:
+    return abs(left - right) <= atol + rtol * abs(right)
+
+
+def keep_if_smaller(best: float, loss: float) -> float:
+    if loss < best:
+        return loss
+    return best
+
+
+def float32_associativity() -> tuple[float, float]:
+    big = float(2**24)
+    left = add32(add32(big, 1.0), -big)
+    right = add32(add32(big, -big), 1.0)
+    return left, right
+
+
+def broadcast_shapes(left: tuple[int, ...], right: tuple[int, ...]) -> tuple[int, ...]:
+    width = max(len(left), len(right))
+    a = (1,) * (width - len(left)) + left
+    b = (1,) * (width - len(right)) + right
+    result = []
+    for x, y in zip(a, b):
+        if x != y and x != 1 and y != 1:
+            raise ValueError((left, right))
+        result.append(max(x, y))
+    return tuple(result)
+
+
+def add_on_axis(matrix: list[list[int]], vector: list[int], axis: int) -> list[list[int]]:
+    row_count = len(matrix)
+    col_count = len(matrix[0])
+    if axis == 0 and len(vector) != row_count:
+        raise ValueError("axis 0")
+    if axis == 1 and len(vector) != col_count:
+        raise ValueError("axis 1")
+    out = []
+    for i in range(row_count):
+        row = []
+        for j in range(col_count):
+            extra = vector[i] if axis == 0 else vector[j]
+            row.append(matrix[i][j] + extra)
+        out.append(row)
+    return out
+
+
+def matmul(left: list[list[int]], right: list[list[int]]) -> tuple[list[list[int]], int]:
+    row_count = len(left)
+    inner = len(right)
+    col_count = len(right[0])
+    if any(len(row) != inner for row in left):
+        raise ValueError("inner dimension")
+    product = []
+    multiplies = 0
+    for i in range(row_count):
+        row_out = []
+        for j in range(col_count):
+            total = 0
+            for t in range(inner):
+                total += left[i][t] * right[t][j]
+                multiplies += 1
+            row_out.append(total)
+        product.append(row_out)
+    return product, multiplies
+
+
+def masked_sum(rows: list[list[int]], mask: list[list[int]]) -> tuple[int, int]:
+    total = 0
+    count = 0
+    for row, bits in zip(rows, mask):
+        for value, bit in zip(row, bits):
+            if bit:
+                total += value
+                count += 1
+    return total, count
+
+
+def sum_all(rows: list[list[int]]) -> tuple[int, int]:
+    total = 0
+    count = 0
+    for row in rows:
+        for value in row:
+            total += value
+            count += 1
+    return total, count
+
+
+def write_through(matrix: list[list[int]]) -> list[list[int]]:
+    row = matrix[0]
+    row[0] = 9
+    return matrix
+
+
+def write_on_copy(matrix: list[list[int]]) -> tuple[list[list[int]], list[int]]:
+    row = matrix[0][:]
+    row[0] = 9
+    return matrix, row
+
+
+def check_numerics() -> None:
+    if gap_at_one() != (True, False):
+        raise AssertionError(gap_at_one())
+    if (1.0 + 2.0**-52) - 1.0 != 2.0**-52:
+        raise AssertionError("ulp at one")
+
+    if f32(2**24) != 16777216.0 or f32(2**24 + 1) != 16777216.0:
+        raise AssertionError("float32 tie at 2**24")
+    if f32(2**24 + 2) != 16777218.0:
+        raise AssertionError(f32(2**24 + 2))
+    if f32(1.0 + 2.0**-24) != 1.0:
+        raise AssertionError("float32 half ulp at one")
+    if f32(1.0 + 2.0**-23) != 1.0 + 2.0**-23:
+        raise AssertionError(f32(1.0 + 2.0**-23))
+    acc = f32(2**24)
+    for _ in range(10):
+        acc = add32(acc, 1.0)
+    if acc != 16777216.0:
+        raise AssertionError(acc)
+    if float32_associativity() != (0.0, 1.0):
+        raise AssertionError(float32_associativity())
+
+    big = float(2**53)
+    if big + 1.0 != big:
+        raise AssertionError("2**53 should absorb 1")
+    if sum_left([1.0, big, -big]) != 0.0:
+        raise AssertionError("left fold")
+    if 1.0 + (big + (-big)) != 1.0:
+        raise AssertionError("reassociated sum")
+    if sum_tenths() == 1.0 or sum_tenths() != 1.0 - 2.0**-53:
+        raise AssertionError(sum_tenths())
+    if not almost_equal(sum_tenths(), 1.0, atol=1e-12, rtol=0.0):
+        raise AssertionError("tenths within 1e-12")
+    if almost_equal(sum_tenths(), 1.0, atol=0.0, rtol=0.0):
+        raise AssertionError("zero tolerance should reject tenths")
+    if not almost_equal(big, big + 2.0, atol=0.0, rtol=1e-9):
+        raise AssertionError("loose rtol should accept a difference of 2")
+    if almost_equal(big, big + 2.0, atol=0.0, rtol=0.0):
+        raise AssertionError("exact ints differ by 2")
+    if abs((big + 2.0) - big) != 2.0:
+        raise AssertionError("difference of two large integers")
+    threshold = 1e-9 * (big + 2.0)
+    if not (9.007e6 < threshold < 9.008e6):
+        raise AssertionError(threshold)
+
+    nan = float("nan")
+    if nan == nan or nan < 1.0 or keep_if_smaller(1.0, nan) != 1.0:
+        raise AssertionError("NaN comparison")
+    if not math.isnan(sum_left([1.0, nan, 3.0])):
+        raise AssertionError("NaN should stick")
+
+    if broadcast_shapes((2, 3), (3,)) != (2, 3):
+        raise AssertionError("broadcast feature")
+    if broadcast_shapes((3,), (2, 3)) != (2, 3):
+        raise AssertionError("broadcast swapped")
+    try:
+        broadcast_shapes((2, 3), (2,))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("2 against 3 should fail")
+    if broadcast_shapes((2, 3), (2, 1)) != (2, 3):
+        raise AssertionError("broadcast column")
+    if broadcast_shapes((2, 3, 4), (3, 1)) != (2, 3, 4):
+        raise AssertionError("broadcast time mask")
+    if broadcast_shapes((2, 3, 3), (3,)) != (2, 3, 3):
+        raise AssertionError("broadcast onto vocab")
+
+    matrix = [[1, 2], [3, 4]]
+    if add_on_axis(matrix, [10, 0], 1) != [[11, 2], [13, 4]]:
+        raise AssertionError("feature axis")
+    if add_on_axis(matrix, [10, 0], 0) != [[11, 12], [3, 4]]:
+        raise AssertionError("batch axis")
+
+    product, multiplies = matmul(
+        [[1, 2, 3], [4, 5, 6]],
+        [[1, 0], [0, 1], [1, 1]],
+    )
+    if product != [[4, 5], [10, 11]] or multiplies != 12:
+        raise AssertionError((product, multiplies))
+
+    rows = [[1, 3, 0], [5, 7, 0]]
+    mask = [[1, 1, 0], [1, 1, 0]]
+    if masked_sum(rows, mask) != (16, 4) or sum_all(rows) != (16, 6):
+        raise AssertionError((masked_sum(rows, mask), sum_all(rows)))
+    if Fraction(16, 4) != 4 or Fraction(16, 6) != Fraction(8, 3):
+        raise AssertionError("means")
+    padded = [[1, 3, 100], [5, 7, 100]]
+    if masked_sum(padded, mask) != (16, 4) or sum_all(padded) != (216, 6):
+        raise AssertionError((masked_sum(padded, mask), sum_all(padded)))
+
+    aliased = [[1, 2], [3, 4]]
+    if write_through(aliased) != [[9, 2], [3, 4]]:
+        raise AssertionError(aliased)
+    original = [[1, 2], [3, 4]]
+    kept, row = write_on_copy(original)
+    if kept != [[1, 2], [3, 4]] or row != [9, 2]:
+        raise AssertionError((kept, row))
+
+
 def main() -> None:
     check_softmax()
     check_perplexity()
@@ -2702,6 +2930,7 @@ def main() -> None:
     check_optimizer()
     check_attention()
     check_structures()
+    check_numerics()
     check_activation_norm()
     check_pretraining()
     check_minimal_experiment()
