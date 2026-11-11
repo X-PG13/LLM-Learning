@@ -3197,6 +3197,139 @@ def check_trees() -> None:
         raise AssertionError((round(math.log(2.0), 4), round(mean_nll(0.5), 4), round(mean_nll(2.0), 4)))
 
 
+def check_seed_intervals() -> None:
+    # 五个配对差：-0.3, -0.2, -0.1, 0, 0.1。平方和除以 4，再除以种子数 5。
+    diffs = tuple(Fraction(k, 10) for k in (-3, -2, -1, 0, 1))
+    mean = sum(diffs, Fraction(0)) / 5
+    ss = sum((d - mean) ** 2 for d in diffs)
+    if (mean, ss, ss / 4) != (Fraction(-1, 10), Fraction(1, 10), Fraction(1, 40)):
+        raise AssertionError((mean, ss))
+    if (round(math.sqrt(0.025), 4), round(math.sqrt(0.005), 4)) != (0.1581, 0.0707):
+        raise AssertionError("paired spread")
+    mle_se = math.sqrt(0.004)
+    if (round(mle_se, 4), round(math.sqrt(0.8), 4)) != (0.0632, 0.8944):
+        raise AssertionError((round(mle_se, 4), round(math.sqrt(0.8), 4)))
+
+    baseline = tuple(Fraction(k, 10) for k in (19, 22, 25, 23, 21))
+    changed = tuple(Fraction(k, 10) for k in (16, 20, 24, 23, 22))
+    base_mean = sum(baseline, Fraction(0)) / 5
+    changed_mean = sum(changed, Fraction(0)) / 5
+    if (base_mean, changed_mean, changed_mean - base_mean) != (Fraction(11, 5), Fraction(21, 10), mean):
+        raise AssertionError("paired means")
+    ss_base = sum((x - base_mean) ** 2 for x in baseline)
+    ss_changed = sum((x - changed_mean) ** 2 for x in changed)
+    if (ss_base, ss_changed) != (Fraction(1, 5), Fraction(2, 5)):
+        raise AssertionError((ss_base, ss_changed))
+    if round(math.sqrt(0.02), 4) != 0.1414 or round(math.sqrt(0.03), 4) != 0.1732:
+        raise AssertionError("independent formula on paired runs")
+
+    def half_width(crit: float, variance: float) -> float:
+        return crit * math.sqrt(variance)
+
+    endpoints = {}
+    for crit, key in ((2.776, "t95"), (1.96, "z"), (2.132, "t90")):
+        half = half_width(crit, 0.005)
+        endpoints[key] = (round(half, 4),)
+        for center in (-0.1, -0.16, -0.3):
+            endpoints[(key, center)] = (round(center - half, 4), round(center + half, 4))
+    if endpoints["t95"] != (0.1963,) or endpoints["z"] != (0.1386,) or endpoints["t90"] != (0.1508,):
+        raise AssertionError("half widths")
+    if endpoints[("t95", -0.1)] != (-0.2963, 0.0963):
+        raise AssertionError(endpoints[("t95", -0.1)])
+    if endpoints[("z", -0.1)] != (-0.2386, 0.0386):
+        raise AssertionError(endpoints[("z", -0.1)])
+    if endpoints[("t90", -0.1)] != (-0.2508, 0.0508):
+        raise AssertionError(endpoints[("t90", -0.1)])
+    if endpoints[("t95", -0.16)] != (-0.3563, 0.0363) or not (
+        endpoints[("t95", -0.16)][0] < 0 < endpoints[("t95", -0.16)][1]
+    ):
+        raise AssertionError("t interval at -0.16 should contain 0")
+    if endpoints[("z", -0.16)] != (-0.2986, -0.0214) or endpoints[("z", -0.16)][1] >= 0:
+        raise AssertionError("normal interval at -0.16 should exclude 0")
+    if endpoints[("t90", -0.16)] != (-0.3108, -0.0092) or endpoints[("t90", -0.16)][1] >= 0:
+        raise AssertionError("90 percent interval at -0.16 should exclude 0")
+    if endpoints[("t95", -0.3)] != (-0.4963, -0.1037):
+        raise AssertionError(endpoints[("t95", -0.3)])
+    if endpoints[("z", -0.3)] != (-0.4386, -0.1614):
+        raise AssertionError(endpoints[("z", -0.3)])
+    if not (endpoints[("t95", -0.3)][1] < 0 and endpoints[("t95", -0.3)][1] > -0.2):
+        raise AssertionError("upper end clears 0 and misses -0.2")
+    if endpoints[("z", -0.3)][1] <= -0.2:
+        raise AssertionError("normal upper end should also miss -0.2")
+
+    shifted = tuple(d - Fraction(6, 100) for d in diffs)
+    if sum(shifted, Fraction(0)) / 5 != Fraction(-4, 25):
+        raise AssertionError("mean -0.16")
+    if sum((d - Fraction(-4, 25)) ** 2 for d in shifted) != ss:
+        raise AssertionError("shift keeps the sum of squares")
+    large = tuple(Fraction(k, 10) for k in (-5, -4, -3, -2, -1))
+    if sum(large, Fraction(0)) / 5 != Fraction(-3, 10):
+        raise AssertionError("mean -0.3")
+
+    # 十次运行没有共用种子。两边 SE 都是 0.1，差是 -0.45，分位数仍是 2.776。
+    arm_a = tuple(Fraction(k, 100) for k in (190, 210, 220, 230, 250))
+    arm_b = tuple(Fraction(k, 100) for k in (135, 185, 185, 185, 185))
+    mean_a = sum(arm_a, Fraction(0)) / 5
+    mean_b = sum(arm_b, Fraction(0)) / 5
+    if (mean_a, mean_b, mean_b - mean_a) != (Fraction(11, 5), Fraction(7, 4), Fraction(-9, 20)):
+        raise AssertionError((mean_a, mean_b))
+    if sum((x - mean_a) ** 2 for x in arm_a) != Fraction(1, 5):
+        raise AssertionError("baseline sum of squares")
+    if sum((x - mean_b) ** 2 for x in arm_b) != Fraction(1, 5):
+        raise AssertionError("changed sum of squares")
+    if round(math.sqrt(0.05), 4) != 0.2236:
+        raise AssertionError(round(math.sqrt(0.05), 4))
+    if 2.776 * 0.1 != 0.2776:
+        raise AssertionError("individual half width")
+    if (round(2.2 - 0.2776, 4), round(2.2 + 0.2776, 4)) != (1.9224, 2.4776):
+        raise AssertionError("baseline interval")
+    if (round(1.75 - 0.2776, 4), round(1.75 + 0.2776, 4)) != (1.4724, 2.0276):
+        raise AssertionError("changed interval")
+    if not (1.9224 < 2.0276):
+        raise AssertionError("intervals should overlap")
+    gap = half_width(2.776, 0.02)
+    if (round(gap, 4), round(2.776 * math.sqrt(2) * 0.1, 4), round(2.776 * 0.2, 4)) != (0.3926, 0.3926, 0.5552):
+        raise AssertionError((round(gap, 4), round(2.776 * 0.2, 4)))
+    if (round(-0.45 - gap, 4), round(-0.45 + gap, 4)) != (-0.8426, -0.0574):
+        raise AssertionError("difference interval")
+    if -0.45 + gap >= 0 or -0.30 + gap <= 0:
+        raise AssertionError("0.45 excludes 0 and 0.30 does not")
+    if round(-0.30 + gap, 4) != 0.0926:
+        raise AssertionError(round(-0.30 + gap, 4))
+    if not (0.3926 < 0.45 < 0.5552):
+        raise AssertionError("0.45 sits between the two bounds")
+
+    false_pairs = tuple(b - a for a, b in zip(arm_a, arm_b))
+    false_mean = sum(false_pairs, Fraction(0)) / 5
+    false_ss = sum((d - false_mean) ** 2 for d in false_pairs)
+    if false_pairs != tuple(Fraction(k, 100) for k in (-55, -25, -35, -45, -65)):
+        raise AssertionError(false_pairs)
+    if (false_mean, false_ss) != (Fraction(-9, 20), Fraction(1, 10)):
+        raise AssertionError((false_mean, false_ss))
+    if round(math.sqrt(0.005), 4) != 0.0707 or math.sqrt(0.02) / math.sqrt(0.005) != 2:
+        raise AssertionError("false pairing halves the standard error")
+    rounded_half = 2.776 * round(math.sqrt(0.02), 4)
+    if round(rounded_half, 4) != 0.3925:
+        raise AssertionError(round(rounded_half, 4))
+    if (round(-0.45 - rounded_half, 4), round(-0.45 + rounded_half, 4)) != (-0.8425, -0.0575):
+        raise AssertionError("rounding the standard error first")
+
+    if min(diffs) != Fraction(-3, 10) or sum(d < 0 for d in diffs) != 3:
+        raise AssertionError("best seed and sign count")
+    finite = diffs[:-1]
+    if sum(finite, Fraction(0)) / 4 != Fraction(-3, 20):
+        raise AssertionError("mean of four finite runs")
+
+    none_exclude = (Fraction(19, 20)) ** 5
+    one_excludes = 1 - none_exclude
+    if (none_exclude, one_excludes) != (Fraction(2476099, 3200000), Fraction(723901, 3200000)):
+        raise AssertionError((none_exclude, one_excludes))
+    if round(float(one_excludes), 4) != 0.2262:
+        raise AssertionError(round(float(one_excludes), 4))
+    if 1 - Fraction(1, 2) ** 4 != Fraction(15, 16):
+        raise AssertionError("learning-rate selection is a different probability")
+
+
 def main() -> None:
     check_softmax()
     check_perplexity()
@@ -3220,6 +3353,7 @@ def main() -> None:
     check_activation_norm()
     check_pretraining()
     check_minimal_experiment()
+    check_seed_intervals()
     check_alignment()
     check_evaluation()
     check_rag()
