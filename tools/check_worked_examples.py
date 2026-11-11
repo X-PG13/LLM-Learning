@@ -2912,6 +2912,291 @@ def check_numerics() -> None:
         raise AssertionError((kept, row))
 
 
+def leaf_sse(values: list[Fraction]) -> Fraction:
+    mean = sum(values, Fraction(0)) / len(values)
+    return sum((value - mean) ** 2 for value in values)
+
+
+def split_rows(y: list[Fraction]) -> list[tuple[int, Fraction, Fraction, Fraction]]:
+    rows = []
+    for k in range(1, len(y)):
+        left, right = y[:k], y[k:]
+        rows.append((k, sum(left) / len(left), sum(right) / len(right), leaf_sse(left) + leaf_sse(right)))
+    return rows
+
+
+def best_stump(y: list[Fraction]) -> int:
+    best_k = 1
+    best: Fraction | None = None
+    for k, _, _, score in split_rows(y):
+        if best is None or score < best:
+            best = score
+            best_k = k
+    return best_k
+
+
+def apply_stump(y: list[Fraction], k: int, nu: Fraction, current: list[Fraction]) -> list[Fraction]:
+    residual = [y[i] - current[i] for i in range(len(y))]
+    left = sum(residual[:k], Fraction(0)) / k
+    right = sum(residual[k:], Fraction(0)) / (len(y) - k)
+    step = [left] * k + [right] * (len(y) - k)
+    return [current[i] + nu * step[i] for i in range(len(y))]
+
+
+def gini_binary(n_pos: int, n_neg: int) -> Fraction:
+    total = n_pos + n_neg
+    p = Fraction(n_pos, total)
+    return 2 * p * (1 - p)
+
+
+def misclassification_rate(n_pos: int, n_neg: int) -> Fraction:
+    total = n_pos + n_neg
+    return Fraction(min(n_pos, n_neg), total)
+
+
+def binary_entropy(p: float) -> float:
+    if p in (0.0, 1.0):
+        return 0.0
+    return -p * math.log(p) - (1.0 - p) * math.log(1.0 - p)
+
+
+def build_regression_tree(xs: list[Fraction], ys: list[Fraction]):
+    if len(ys) == 1 or all(value == ys[0] for value in ys):
+        return ("leaf", sum(ys, Fraction(0)) / len(ys))
+    k = best_stump(ys)
+    threshold = (xs[k - 1] + xs[k]) / 2
+    return (
+        "node",
+        threshold,
+        build_regression_tree(xs[:k], ys[:k]),
+        build_regression_tree(xs[k:], ys[k:]),
+    )
+
+
+def predict_tree(tree, x: Fraction) -> Fraction:
+    if tree[0] == "leaf":
+        return tree[1]
+    _, threshold, left, right = tree
+    if x <= threshold:
+        return predict_tree(left, x)
+    return predict_tree(right, x)
+
+
+def ensemble_variance(sigma2: Fraction, rho: Fraction, trees: int | None) -> Fraction:
+    if trees is None:
+        return rho * sigma2
+    return rho * sigma2 + (1 - rho) * sigma2 / trees
+
+
+def check_trees() -> None:
+    y = [Fraction(v) for v in (1, 2, 6, 7)]
+    xs = [Fraction(v) for v in (1, 2, 3, 4)]
+    if leaf_sse(y) != 26 or leaf_sse(y) / 4 != Fraction(13, 2):
+        raise AssertionError(leaf_sse(y))
+    rows = split_rows(y)
+    if rows != [
+        (1, Fraction(1), Fraction(5), Fraction(14)),
+        (2, Fraction(3, 2), Fraction(13, 2), Fraction(1)),
+        (3, Fraction(3), Fraction(7), Fraction(14)),
+    ]:
+        raise AssertionError(rows)
+    if best_stump(y) != 2:
+        raise AssertionError(best_stump(y))
+    stump = [Fraction(3, 2), Fraction(3, 2), Fraction(13, 2), Fraction(13, 2)]
+    if leaf_sse([y[i] - stump[i] for i in range(4)]) != 1:
+        raise AssertionError("stump sse")
+    if Fraction(1, 4) != leaf_sse([y[i] - stump[i] for i in range(4)]) / 4:
+        raise AssertionError("mean loss")
+
+    tree = build_regression_tree(xs, y)
+    fitted = [predict_tree(tree, x) for x in xs]
+    if fitted != y or leaf_sse([y[i] - fitted[i] for i in range(4)]) != 0:
+        raise AssertionError(fitted)
+    held_x, held_y = Fraction(8, 5), Fraction(6, 5)  # 1.6 and 1.2
+    deep_pred = predict_tree(tree, held_x)
+    stump_pred = predict_tree(("node", Fraction(5, 2), ("leaf", Fraction(3, 2)), ("leaf", Fraction(13, 2))), held_x)
+    if deep_pred != 2 or (deep_pred - held_y) ** 2 != Fraction(16, 25):
+        raise AssertionError((deep_pred, (deep_pred - held_y) ** 2))
+    if stump_pred != Fraction(3, 2) or (stump_pred - held_y) ** 2 != Fraction(9, 100):
+        raise AssertionError((stump_pred, (stump_pred - held_y) ** 2))
+
+    if gini_binary(7, 3) != Fraction(21, 50):
+        raise AssertionError(gini_binary(7, 3))
+    if (gini_binary(4, 1), gini_binary(3, 2)) != (Fraction(8, 25), Fraction(12, 25)):
+        raise AssertionError("child gini")
+    weighted_gini = Fraction(1, 2) * (gini_binary(4, 1) + gini_binary(3, 2))
+    if weighted_gini != Fraction(2, 5) or gini_binary(7, 3) - weighted_gini != Fraction(1, 50):
+        raise AssertionError(weighted_gini)
+    if misclassification_rate(7, 3) != Fraction(3, 10):
+        raise AssertionError("parent misclassification")
+    weighted_error = Fraction(1, 2) * (misclassification_rate(4, 1) + misclassification_rate(3, 2))
+    if weighted_error != Fraction(3, 10) or misclassification_rate(7, 3) - weighted_error != 0:
+        raise AssertionError(weighted_error)
+    parent_h = binary_entropy(0.7)
+    left_h = binary_entropy(0.8)
+    right_h = binary_entropy(0.6)
+    weighted_h = 0.5 * (left_h + right_h)
+    if (round(parent_h, 4), round(left_h, 4), round(right_h, 4)) != (0.6109, 0.5004, 0.6730):
+        raise AssertionError((round(parent_h, 4), round(left_h, 4), round(right_h, 4)))
+    if round(weighted_h, 4) != 0.5867 or round(parent_h - weighted_h, 4) != 0.0242:
+        raise AssertionError((round(weighted_h, 4), round(parent_h - weighted_h, 4)))
+
+    if Fraction(3, 4) ** 4 != Fraction(81, 256):
+        raise AssertionError("oob probability")
+    if round(float(Fraction(81, 256)), 4) != 0.3164:
+        raise AssertionError(round(float(Fraction(81, 256)), 4))
+    if round(math.exp(-1), 4) != 0.3679:
+        raise AssertionError(round(math.exp(-1), 4))
+    if 4 * Fraction(81, 256) != Fraction(81, 64):
+        raise AssertionError("expected oob count")
+
+    draws = ((0, 0, 2, 3), (1, 1, 2, 2))
+    oob_sets = []
+    predictions = []
+    for draw in draws:
+        seen = set(draw)
+        oob_sets.append({i for i in range(4) if i not in seen})
+        predictions.append(sum(y[i] for i in draw) / len(draw))
+    if oob_sets != [{1}, {0, 3}] or predictions != [Fraction(15, 4), Fraction(4)]:
+        raise AssertionError((oob_sets, predictions))
+    if draws[0].count(0) != 2 or 0 in oob_sets[0]:
+        raise AssertionError("index 0 is in bag")
+    point_errors = {
+        0: (y[0] - predictions[1]) ** 2,
+        1: (y[1] - predictions[0]) ** 2,
+        3: (y[3] - predictions[1]) ** 2,
+    }
+    if point_errors != {0: Fraction(9), 1: Fraction(49, 16), 3: Fraction(9)}:
+        raise AssertionError(point_errors)
+    by_point = sum(point_errors.values(), Fraction(0)) / 3
+    by_tree = (point_errors[1] + (point_errors[0] + point_errors[3]) / 2) / 2
+    filled = (point_errors[0] + point_errors[1] + 0 + point_errors[3]) / 4
+    if (by_point, by_tree, filled) != (Fraction(337, 48), Fraction(193, 32), Fraction(337, 64)):
+        raise AssertionError((by_point, by_tree, filled))
+
+    sigma2, rho = Fraction(4), Fraction(1, 2)
+    if ensemble_variance(sigma2, rho, 1) != 4:
+        raise AssertionError("B = 1")
+    if ensemble_variance(sigma2, rho, 100) != Fraction(101, 50):
+        raise AssertionError(ensemble_variance(sigma2, rho, 100))
+    if ensemble_variance(sigma2, rho, None) != 2:
+        raise AssertionError("floor")
+    if ensemble_variance(sigma2, Fraction(0), None) != 0:
+        raise AssertionError("uncorrelated floor")
+    expanded = (100 * sigma2 + 100 * 99 * rho * sigma2) / (100 ** 2)
+    if expanded != Fraction(101, 50):
+        raise AssertionError(expanded)
+
+    labels = [Fraction(v) for v in (0, 1, 1, 2)]
+    only_x1 = [Fraction(1, 2), Fraction(1, 2), Fraction(3, 2), Fraction(3, 2)]
+    only_x2 = [Fraction(1, 2), Fraction(3, 2), Fraction(1, 2), Fraction(3, 2)]
+    averaged = [(only_x1[i] + only_x2[i]) / 2 for i in range(4)]
+    if averaged != [Fraction(1, 2), Fraction(1), Fraction(1), Fraction(3, 2)]:
+        raise AssertionError(averaged)
+    sse_x1 = leaf_sse(labels[:2]) + leaf_sse(labels[2:])
+    sse_x2 = leaf_sse([labels[0], labels[2]]) + leaf_sse([labels[1], labels[3]])
+    sse_avg = sum((averaged[i] - labels[i]) ** 2 for i in range(4))
+    if (leaf_sse(labels), sse_x1, sse_x2, sse_avg) != (2, 1, 1, Fraction(1, 2)):
+        raise AssertionError((leaf_sse(labels), sse_x1, sse_x2, sse_avg))
+    if [averaged[i] - labels[i] for i in range(4)] != [Fraction(1, 2), 0, 0, Fraction(-1, 2)]:
+        raise AssertionError("feature residuals")
+    points = ((0, 0, 0), (0, 1, 1), (1, 0, 1), (1, 1, 2))
+    deep = []
+    for x1 in (0, 1):
+        for x2 in (0, 1):
+            leaf = [point[2] for point in points if point[0] == x1 and point[1] == x2]
+            if len(leaf) != 1:
+                raise AssertionError(leaf)
+            deep.append(leaf[0])
+    if deep != [0, 1, 1, 2] or sum((deep[i] - labels[i]) ** 2 for i in range(4)) != 0:
+        raise AssertionError(deep)
+
+    current = [Fraction(4)] * 4
+    residual = [y[i] - current[i] for i in range(4)]
+    shifted = split_rows(residual)
+    if [row[3] for row in shifted] != [row[3] for row in rows] or best_stump(residual) != 2:
+        raise AssertionError(shifted)
+    if (shifted[1][1], shifted[1][2]) != (Fraction(-5, 2), Fraction(5, 2)):
+        raise AssertionError(shifted[1])
+    current = apply_stump(y, 2, Fraction(1, 2), current)
+    if current != [Fraction(11, 4), Fraction(11, 4), Fraction(21, 4), Fraction(21, 4)]:
+        raise AssertionError(current)
+    residual = [y[i] - current[i] for i in range(4)]
+    if leaf_sse(residual) != Fraction(29, 4):
+        raise AssertionError(leaf_sse(residual))
+    second = split_rows(residual)
+    if [row[3] for row in second] != [Fraction(19, 6), Fraction(1), Fraction(19, 6)]:
+        raise AssertionError(second)
+    if best_stump(residual) != 2:
+        raise AssertionError("second half-step")
+    current = apply_stump(y, 2, Fraction(1, 2), current)
+    if current != [Fraction(17, 8), Fraction(17, 8), Fraction(47, 8), Fraction(47, 8)]:
+        raise AssertionError(current)
+    if leaf_sse([y[i] - current[i] for i in range(4)]) != Fraction(41, 16):
+        raise AssertionError("two half-steps")
+
+    full = apply_stump(y, 2, Fraction(1), [Fraction(4)] * 4)
+    if full != stump or leaf_sse([y[i] - full[i] for i in range(4)]) != 1:
+        raise AssertionError(full)
+    residual = [y[i] - full[i] for i in range(4)]
+    if residual != [Fraction(-1, 2), Fraction(1, 2), Fraction(-1, 2), Fraction(1, 2)]:
+        raise AssertionError(residual)
+    tied = split_rows(residual)
+    if [row[3] for row in tied] != [Fraction(2, 3), Fraction(1), Fraction(2, 3)]:
+        raise AssertionError(tied)
+    if (tied[1][1], tied[1][2]) != (0, 0):
+        raise AssertionError("same cut is zero")
+    if best_stump(residual) != 1:
+        raise AssertionError(best_stump(residual))
+    added = apply_stump(y, 1, Fraction(1), full)
+    if added != [Fraction(1), Fraction(5, 3), Fraction(20, 3), Fraction(20, 3)]:
+        raise AssertionError(added)
+    if leaf_sse([y[i] - added[i] for i in range(4)]) != Fraction(2, 3):
+        raise AssertionError("second tree sse")
+    # x = 1.6 is to the right of k = 1 and to the left of k = 3.
+    pred_k1 = full[0] + tied[0][2]
+    pred_k3 = full[0] + tied[2][1]
+    if pred_k1 != Fraction(5, 3) or (pred_k1 - held_y) ** 2 != Fraction(49, 225):
+        raise AssertionError((pred_k1, (pred_k1 - held_y) ** 2))
+    if pred_k3 != Fraction(4, 3) or (pred_k3 - held_y) ** 2 != Fraction(4, 225):
+        raise AssertionError((pred_k3, (pred_k3 - held_y) ** 2))
+    alt = apply_stump(y, 3, Fraction(1), full)
+    if leaf_sse([y[i] - alt[i] for i in range(4)]) != Fraction(2, 3):
+        raise AssertionError("tied k = 3")
+
+    labels_cls = [0, 0, 1, 1]
+    pseudo = [Fraction(label) - Fraction(1, 2) for label in labels_cls]
+    if pseudo != [Fraction(-1, 2), Fraction(-1, 2), Fraction(1, 2), Fraction(1, 2)]:
+        raise AssertionError(pseudo)
+    hessian = Fraction(1, 2) * (1 - Fraction(1, 2))
+    if hessian != Fraction(1, 4):
+        raise AssertionError(hessian)
+    # 梯度是 p - y，牛顿权重是 -梯度和 / 二阶导和。
+    grad_left = sum(Fraction(1, 2) - Fraction(label) for label in labels_cls[:2])
+    hess_left = hessian * 2
+    newton_left = -grad_left / hess_left
+    grad_right = sum(Fraction(1, 2) - Fraction(label) for label in labels_cls[2:])
+    newton_right = -grad_right / hess_left
+    if (newton_left, newton_right) != (-2, 2):
+        raise AssertionError((newton_left, newton_right))
+    if newton_left != pseudo[0] / hessian:
+        raise AssertionError("newton scales the residual mean")
+
+    def sigmoid(value: float) -> float:
+        return 1.0 / (1.0 + math.exp(-value))
+
+    def mean_nll(logit: float) -> float:
+        probability = sigmoid(logit)
+        return -math.log(probability)
+
+    if (round(sigmoid(0.5), 4), round(sigmoid(-0.5), 4)) != (0.6225, 0.3775):
+        raise AssertionError((round(sigmoid(0.5), 4), round(sigmoid(-0.5), 4)))
+    if (round(sigmoid(2.0), 4), round(sigmoid(-2.0), 4)) != (0.8808, 0.1192):
+        raise AssertionError((round(sigmoid(2.0), 4), round(sigmoid(-2.0), 4)))
+    if (round(math.log(2.0), 4), round(mean_nll(0.5), 4), round(mean_nll(2.0), 4)) != (0.6931, 0.4741, 0.1269):
+        raise AssertionError((round(math.log(2.0), 4), round(mean_nll(0.5), 4), round(mean_nll(2.0), 4)))
+
+
 def main() -> None:
     check_softmax()
     check_perplexity()
@@ -2920,6 +3205,7 @@ def main() -> None:
     check_rank_one_and_lora()
     check_logistic()
     check_generalization()
+    check_trees()
     check_backprop()
     check_bpe()
     check_algorithms()
