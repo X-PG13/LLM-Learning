@@ -3330,6 +3330,226 @@ def check_seed_intervals() -> None:
         raise AssertionError("learning-rate selection is a different probability")
 
 
+def rot90(x: float, y: float, turns: int) -> tuple[float, float]:
+    """Rotate (x, y) by `turns` right angles. Turns may be negative."""
+    quarter = turns % 4
+    if quarter == 0:
+        return (x, y)
+    if quarter == 1:
+        return (-y, x)
+    if quarter == 2:
+        return (-x, -y)
+    return (y, -x)
+
+
+def rotate_pair(x0: float, x1: float, phi: float) -> tuple[float, float]:
+    cosine = math.cos(phi)
+    sine = math.sin(phi)
+    return (x0 * cosine - x1 * sine, x0 * sine + x1 * cosine)
+
+
+def check_decoder_structure() -> None:
+    # Right-angle plane: θ = π/2 is applied by quadrant, not by cos(π/2).
+    cos_half_pi = math.cos(math.pi / 2)
+    if round(cos_half_pi * 1e17, 2) != 6.12:
+        raise AssertionError(cos_half_pi)
+    if cos_half_pi == 0.0:
+        raise AssertionError("cos(pi/2) is not a clean zero in float")
+
+    q = (1.0, 0.0)
+    k = (3.0, 1.0)
+    q_at = {m: rot90(*q, m) for m in range(4)}
+    k_at = {n: rot90(*k, n) for n in range(3)}
+    if q_at[0] != (1.0, 0.0) or q_at[1] != (0.0, 1.0) or q_at[2] != (-1.0, 0.0):
+        raise AssertionError(q_at)
+    if q_at[3] != (0.0, -1.0):
+        raise AssertionError(q_at[3])
+    if k_at[0] != (3.0, 1.0) or k_at[1] != (-1.0, 3.0) or k_at[2] != (-3.0, -1.0):
+        raise AssertionError(k_at)
+
+    def dot_at(m: int, n: int) -> float:
+        return sum(a * b for a, b in zip(rot90(*q, m), rot90(*k, n)))
+
+    dots = {(0, 0): 3.0, (1, 1): 3.0, (1, 0): 1.0, (2, 1): 1.0, (0, 1): -1.0, (2, 0): -3.0, (3, 1): -3.0}
+    for pair, expected in dots.items():
+        if dot_at(*pair) != expected:
+            raise AssertionError((pair, dot_at(*pair)))
+    # Same relative angle applied only to k: R_{-π/2}(3, 1) = (1, -3).
+    if rot90(*k, -1) != (1.0, -3.0):
+        raise AssertionError(rot90(*k, -1))
+    if q[0] * 1.0 + q[1] * -3.0 != 1.0:
+        raise AssertionError("relative rotation of k")
+
+    # Real base frequencies, 0-based planes, d = d_k = 4.
+    if 10000 ** (-0 / 4) != 1.0:
+        raise AssertionError("theta_0")
+    if 10000 ** (-2 / 4) != 0.01:
+        raise AssertionError("theta_1")
+    if 10000 ** (2 / 4) != 100:
+        raise AssertionError("shared sinusoidal denominator")
+
+    q1 = rotate_pair(1.0, 0.0, 1.0)
+    q2 = rotate_pair(1.0, 0.0, 2.0)
+    if (round(q1[0], 4), round(q1[1], 4)) != (0.5403, 0.8415):
+        raise AssertionError(q1)
+    if (round(q2[0], 4), round(q2[1], 4)) != (-0.4161, 0.9093):
+        raise AssertionError(q2)
+    dot_far = sum(a * b for a, b in zip(q2, q1))
+    assert_close(dot_far, math.cos(1.0))
+    if round(dot_far, 4) != 0.5403:
+        raise AssertionError(round(dot_far, 4))
+    rounded_replay = round(q2[0], 4) * round(q1[0], 4) + round(q2[1], 4) * round(q1[1], 4)
+    if round(rounded_replay, 4) != 0.5404:
+        raise AssertionError(round(rounded_replay, 4))
+
+    two_plane = rotate_pair(1.0, 0.0, 1.0) + rotate_pair(1.0, 0.0, 0.01)
+    shown = (
+        round(two_plane[0], 4),
+        round(two_plane[1], 4),
+        round(two_plane[2], 6),
+        round(two_plane[3], 4),
+    )
+    if shown != (0.5403, 0.8415, 0.999950, 0.0100):
+        raise AssertionError(shown)
+
+    # Pre-norm RMS residual versus post-norm, same W.
+    x = (1.0, 3.0)
+    rms = math.sqrt(sum(v * v for v in x) / 2)
+    assert_close(rms, math.sqrt(5.0))
+    if round(rms, 6) != 2.236068:
+        raise AssertionError(round(rms, 6))
+    u = tuple(v / rms for v in x)
+    if tuple(round(v, 6) for v in u) != (0.447214, 1.341641):
+        raise AssertionError(u)
+    w = ((1.0, 1.0), (0.0, 1.0))
+
+    def apply_w(vec: tuple[float, float]) -> tuple[float, float]:
+        return tuple(sum(vec[j] * row[j] for j in range(2)) for row in w)
+
+    a = apply_w(u)
+    h = (x[0] + a[0], x[1] + a[1])
+    assert_close(a[0], 4 / math.sqrt(5))
+    assert_close(a[1], 3 / math.sqrt(5))
+    if tuple(round(v, 6) for v in a) != (1.788854, 1.341641):
+        raise AssertionError(a)
+    if tuple(round(v, 6) for v in h) != (2.788854, 4.341641):
+        raise AssertionError(h)
+
+    summed = (5.0, 6.0)
+    if apply_w(x) != (4.0, 3.0):
+        raise AssertionError(apply_w(x))
+    rms_sum = math.sqrt(sum(v * v for v in summed) / 2)
+    assert_close(rms_sum, math.sqrt(61 / 2))
+    if round(rms_sum, 6) != 5.522681:
+        raise AssertionError(round(rms_sum, 6))
+    post = tuple(v / rms_sum for v in summed)
+    if tuple(round(v, 6) for v in post) != (0.905357, 1.086429):
+        raise AssertionError(post)
+
+    gamma = (2.0, 1.0)
+    u_gamma = tuple(g * v / rms for g, v in zip(gamma, x))
+    if tuple(round(v, 6) for v in u_gamma) != (0.894427, 1.341641):
+        raise AssertionError(u_gamma)
+    a_gamma = apply_w(u_gamma)
+    h_gamma = (x[0] + a_gamma[0], x[1] + a_gamma[1])
+    assert_close(a_gamma[0], math.sqrt(5.0))
+    assert_close(a_gamma[1], 3 / math.sqrt(5))
+    assert_close(h_gamma[0], 1 + math.sqrt(5.0))
+    if tuple(round(v, 6) for v in h_gamma) != (3.236068, 4.341641):
+        raise AssertionError(h_gamma)
+
+    # SwiGLU: gate, value, product, output projection.
+    def silu(z: float) -> float:
+        return z / (1.0 + math.exp(-z))
+
+    if round(silu(1.0), 6) != 0.731059 or round(silu(-2.0), 6) != -0.238406:
+        raise AssertionError((silu(1.0), silu(-2.0)))
+    gate = (silu(1.0), silu(-2.0))
+    up = (-1.0, 1.0)
+    product = tuple(g * u_i for g, u_i in zip(gate, up))
+    if tuple(round(v, 6) for v in product) != (-0.731059, -0.238406):
+        raise AssertionError(product)
+    y = (product[0], product[0] + product[1])
+    if tuple(round(v, 6) for v in y) != (-0.731059, -0.969464):
+        raise AssertionError(y)
+    if round(round(product[0], 6) + round(product[1], 6), 6) != -0.969465:
+        raise AssertionError("rounded product sum")
+
+    d_model = 512
+    raw_ff = (8 * d_model) // 3
+    if raw_ff != 1365 or raw_ff % 256 != 85:
+        raise AssertionError(raw_ff)
+    rounded_ff = raw_ff + 256 - (raw_ff % 256)
+    if rounded_ff != 1536:
+        raise AssertionError(rounded_ff)
+    params_raw = 3 * d_model * raw_ff
+    params_rounded = 3 * d_model * rounded_ff
+    relu_ff = 8 * d_model * d_model
+    wide = 3 * d_model * (4 * d_model)
+    if (params_raw, params_rounded, relu_ff, wide) != (2_096_640, 2_359_296, 2_097_152, 3_145_728):
+        raise AssertionError((params_raw, params_rounded, relu_ff, wide))
+    if relu_ff - params_raw != 512 or params_rounded / relu_ff != 1.125:
+        raise AssertionError("ffn ratio")
+    if Fraction(params_rounded, relu_ff) != Fraction(9, 8):
+        raise AssertionError(Fraction(params_rounded, relu_ff))
+    if wide != Fraction(3, 2) * relu_ff:
+        raise AssertionError("three matrices at width 4d")
+
+    # GQA grouping, shared-KV outputs, params, cache bytes.
+    def kv_group(q_head: int, num_q_heads: int, num_kv_heads: int) -> int:
+        return q_head // (num_q_heads // num_kv_heads)
+
+    if (kv_group(0, 4, 2), kv_group(1, 4, 2), kv_group(2, 4, 2), kv_group(3, 4, 2)) != (0, 0, 1, 1):
+        raise AssertionError("contiguous groups")
+    if 1 % 2 != 1:
+        raise AssertionError("modulo indexing would move head 1")
+    if kv_group(5, 8, 2) != 1 or [h for h in range(8) if kv_group(h, 8, 2) == 1] != [4, 5, 6, 7]:
+        raise AssertionError("head 5 group")
+
+    def softmax_pair(scores: tuple[float, float]) -> tuple[float, float]:
+        weights = softmax(list(scores))
+        return (weights[0], weights[1])
+
+    w0 = softmax_pair((1.0, 0.0))
+    if tuple(round(v, 6) for v in w0) != (0.731059, 0.268941):
+        raise AssertionError(w0)
+    out0 = w0[0] * 4 + w0[1] * 2
+    if round(out0, 6) != 3.462117:
+        raise AssertionError(round(out0, 6))
+    if round(round(w0[0], 6) * 4 + round(w0[1], 6) * 2, 6) != 3.462118:
+        raise AssertionError("rounded attention weights")
+    if 0.5 * 4 + 0.5 * 2 != 3:
+        raise AssertionError("head 1")
+    w2 = softmax_pair((2.0, 0.0))
+    if tuple(round(v, 6) for v in w2) != (0.880797, 0.119203):
+        raise AssertionError(w2)
+    out2 = w2[0] * 1 + w2[1] * 5
+    if round(out2, 6) != 1.476812:
+        raise AssertionError(round(out2, 6))
+
+    def attn_params(num_kv: int) -> tuple[int, int, int]:
+        w_q = 8 * 8
+        w_kv = 8 * (num_kv * 2)
+        return w_q, w_kv, w_q + w_kv + w_kv + w_q
+
+    if attn_params(4) != (64, 64, 256):
+        raise AssertionError(attn_params(4))
+    if attn_params(2) != (64, 32, 192):
+        raise AssertionError(attn_params(2))
+    if attn_params(1) != (64, 16, 160):
+        raise AssertionError(attn_params(1))
+    if 256 - 192 != 2 * 8 * (8 - 4) or 192 - 160 != 2 * 8 * (4 - 2):
+        raise AssertionError("kv projection delta")
+
+    def cache_bytes(num_kv: int) -> int:
+        return 1 * 2 * num_kv * 2 * 4 * 1 * 2
+
+    if (cache_bytes(4), cache_bytes(2), cache_bytes(1)) != (128, 64, 32):
+        raise AssertionError((cache_bytes(4), cache_bytes(2), cache_bytes(1)))
+    if cache_bytes(2) != 32 * 2:
+        raise AssertionError("byte factor")
+
+
 def main() -> None:
     check_softmax()
     check_perplexity()
@@ -3348,6 +3568,7 @@ def main() -> None:
     check_statistics()
     check_optimizer()
     check_attention()
+    check_decoder_structure()
     check_structures()
     check_numerics()
     check_activation_norm()
