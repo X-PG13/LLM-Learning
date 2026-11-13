@@ -3550,6 +3550,219 @@ def check_decoder_structure() -> None:
         raise AssertionError("byte factor")
 
 
+def check_agents() -> None:
+    orders = {1042: "杭州", 1001: "北京"}
+    weather = {"杭州": "雨", "北京": "晴", "上海": "阴"}
+
+    def lookup_order(order_id: object) -> str:
+        if type(order_id) is not int or not 1000 <= order_id <= 9999:
+            return "参数不合法"
+        return orders.get(order_id, "无此订单")
+
+    def lookup_weather(city: object) -> str:
+        if city not in weather:
+            return "参数不合法"
+        return weather[city]
+
+    def order_weather(order_id: object) -> str:
+        city = lookup_order(order_id)
+        if city in ("参数不合法", "无此订单"):
+            return city
+        return weather[city]
+
+    def add(left: object, right: object) -> object:
+        if type(left) is not int or type(right) is not int:
+            return "参数不合法"
+        return left + right
+
+    def copy_weather(order_id: int, observations: list[str]) -> tuple[str, object]:
+        if observations and observations[-1] in ("参数不合法", "无此订单"):
+            return ("finish", "无法回答")
+        city = None
+        seen_weather = None
+        for obs in observations:
+            if obs in orders.values():
+                city = obs
+            if obs in weather.values():
+                seen_weather = obs
+        if seen_weather is not None:
+            answer = "下雨" if seen_weather == "雨" else "不下雨"
+            return ("finish", answer)
+        if city is not None:
+            return ("lookup_weather", city)
+        return ("lookup_order", order_id)
+
+    def trace_supported(order_id: int, events: list[tuple[str, object, object]]) -> bool:
+        city = None
+        seen_weather = None
+        for kind, arg, obs in events:
+            if kind == "lookup_order" and arg == order_id and obs == orders.get(order_id):
+                city = obs
+            elif kind == "lookup_weather" and city is not None and arg == city and obs == weather.get(arg):
+                seen_weather = obs
+            elif kind == "finish":
+                if city is None or seen_weather is None:
+                    return False
+                expected = "下雨" if seen_weather == "雨" else "不下雨"
+                return arg == expected
+        return False
+
+    def answer_correct(order_id: int, text: str) -> bool:
+        expected = "下雨" if weather[orders[order_id]] == "雨" else "不下雨"
+        return text == expected
+
+    calls = {
+        1042: "杭州",
+        1001: "北京",
+        1008: "无此订单",
+        1000: "无此订单",
+        9999: "无此订单",
+        999: "参数不合法",
+        10000: "参数不合法",
+        "1042": "参数不合法",
+    }
+    if {key: lookup_order(key) for key in calls} != calls:
+        raise AssertionError({key: lookup_order(key) for key in calls})
+    kinds = {"城市": 0, "无此订单": 0, "参数不合法": 0}
+    for value in calls.values():
+        kinds["城市" if value in orders.values() else value] += 1
+    if kinds != {"城市": 2, "无此订单": 3, "参数不合法": 3}:
+        raise AssertionError(kinds)
+    # Rejected ids never need the order table: the predicate fails first.
+    if lookup_order(104) != "参数不合法":
+        raise AssertionError("104 is outside the closed interval")
+
+    if lookup_weather("上海") != "阴" or lookup_weather("深圳") != "参数不合法":
+        raise AssertionError("weather predicate")
+    if (order_weather(1042), order_weather(1001), order_weather(1008), order_weather(104)) != (
+        "雨",
+        "晴",
+        "无此订单",
+        "参数不合法",
+    ):
+        raise AssertionError("joined tool")
+    if add(1042, 8) != 1050 or add("1042", 8) != "参数不合法":
+        raise AssertionError("add")
+
+    if copy_weather(1042, []) != ("lookup_order", 1042):
+        raise AssertionError("step 0")
+    if copy_weather(1042, ["杭州"]) != ("lookup_weather", "杭州"):
+        raise AssertionError("step 1 uses the written city")
+    if copy_weather(1042, ["杭州", "雨"]) != ("finish", "下雨"):
+        raise AssertionError("step 2")
+    if copy_weather(1001, []) != ("lookup_order", 1001):
+        raise AssertionError("counterfactual step 0")
+    if copy_weather(1001, ["北京"]) != ("lookup_weather", "北京"):
+        raise AssertionError("counterfactual step 1")
+    if copy_weather(1001, ["北京", "晴"]) != ("finish", "不下雨"):
+        raise AssertionError("counterfactual finish")
+    if copy_weather(1042, []) != ("lookup_order", 1042):
+        raise AssertionError("dropping 杭州 returns to the order lookup")
+    if copy_weather(1042, ["参数不合法"]) != ("finish", "无法回答"):
+        raise AssertionError("invalid argument stops")
+    if copy_weather(1042, ["晴"]) != ("finish", "不下雨"):
+        raise AssertionError("finish follows the weather observation")
+    if copy_weather(1042, ["阴"]) != ("finish", "不下雨"):
+        raise AssertionError("阴 is not rain")
+
+    success_1042 = [
+        ("lookup_order", 1042, "杭州"),
+        ("lookup_weather", "杭州", "雨"),
+        ("finish", "下雨", None),
+    ]
+    success_1001 = [
+        ("lookup_order", 1001, "北京"),
+        ("lookup_weather", "北京", "晴"),
+        ("finish", "不下雨", None),
+    ]
+    wrong_tool = [
+        ("lookup_weather", "北京", "晴"),
+        ("finish", "不下雨", None),
+    ]
+    bad_arg = [
+        ("lookup_order", 104, "参数不合法"),
+        ("finish", "无法回答", None),
+    ]
+    ignored = [
+        ("lookup_order", 1042, "杭州"),
+        ("lookup_weather", "北京", "晴"),
+        ("finish", "不下雨", None),
+    ]
+    guessed_first = [
+        ("lookup_weather", "杭州", "雨"),
+        ("lookup_order", 1042, "杭州"),
+        ("finish", "下雨", None),
+    ]
+    if not trace_supported(1042, success_1042) or not answer_correct(1042, "下雨"):
+        raise AssertionError("1042 success")
+    if not trace_supported(1001, success_1001) or not answer_correct(1001, "不下雨"):
+        raise AssertionError("1001 success")
+    if trace_supported(1001, success_1042) or trace_supported(1042, success_1001):
+        raise AssertionError("order id is part of support")
+    wrong_answers = tuple(answer_correct(order_id, "不下雨") for order_id in (1042, 1001))
+    if wrong_answers != (False, True):
+        raise AssertionError(wrong_answers)
+    if any(trace_supported(order_id, wrong_tool) for order_id in (1042, 1001)):
+        raise AssertionError("wrong tool is unsupported")
+    if sum(wrong_answers) != 1:
+        raise AssertionError("accidental accuracy is 1/2")
+    if trace_supported(1042, bad_arg) or trace_supported(1042, ignored):
+        raise AssertionError("bad argument and ignored city")
+    if answer_correct(1042, "不下雨") or trace_supported(1042, guessed_first):
+        raise AssertionError("guessing the city before the order is unsupported")
+    if trace_supported(1042, [("finish", "下雨", None)]):
+        raise AssertionError("a matching string alone is not support")
+
+    probs = tuple(Fraction(mass, 6) for mass in (4, 1, 1))
+    if probs != (Fraction(2, 3), Fraction(1, 6), Fraction(1, 6)):
+        raise AssertionError(probs)
+    both = probs[0] * probs[0]
+    step1_fail = 1 - probs[0]
+    step2_fail = probs[0] * (1 - probs[0])
+    failure = step1_fail + step2_fail
+    if (both, step1_fail, step2_fail, failure, 1 - failure) != (
+        Fraction(4, 9),
+        Fraction(1, 3),
+        Fraction(2, 9),
+        Fraction(5, 9),
+        Fraction(4, 9),
+    ):
+        raise AssertionError((both, step1_fail, step2_fail, failure, 1 - failure))
+    if 1 - both != failure:
+        raise AssertionError("success and failure do not add to 1")
+    if Fraction(5, 9) - Fraction(1, 3) != Fraction(2, 9):
+        raise AssertionError("extra failure")
+    if Fraction(2, 3) - Fraction(4, 9) != Fraction(2, 9):
+        raise AssertionError("lost success")
+    logits = [math.exp(math.log(4.0)), math.exp(0.0), math.exp(0.0)]
+    softmaxed = [value / sum(logits) for value in logits]
+    assert_close(softmaxed[0], 2 / 3, tol=1e-12)
+    assert_close(softmaxed[1], 1 / 6, tol=1e-12)
+    rounded = round(2 / 3, 4)
+    if rounded != 0.6667 or round(rounded * rounded, 4) != 0.4445 or round(4 / 9, 4) != 0.4444:
+        raise AssertionError((rounded, round(rounded * rounded, 4), round(4 / 9, 4)))
+
+    def ttft(n_observations: int) -> int:
+        return 40 + 30 * n_observations
+
+    def model_ms(n_observations: int, n_tokens: int) -> int:
+        return ttft(n_observations) + (n_tokens - 1) * 10
+
+    single = model_ms(0, 3)
+    one_tool = model_ms(0, 5) + 20 + model_ms(1, 3)
+    two_tool = model_ms(0, 5) + 20 + model_ms(1, 5) + 20 + model_ms(2, 3)
+    if (single, one_tool, two_tool) != (60, 190, 350):
+        raise AssertionError((single, one_tool, two_tool))
+    second_action = model_ms(1, 5)
+    finish_increase = ttft(2) - ttft(1)
+    if (second_action, finish_increase, second_action + 20 + finish_increase) != (110, 30, 160):
+        raise AssertionError((second_action, finish_increase, two_tool - one_tool))
+    if two_tool - one_tool != 160 or one_tool - single != 130:
+        raise AssertionError("latency gaps")
+    if ttft(0) + 3 * 10 != 70:
+        raise AssertionError("double-counted first token")
+
+
 def main() -> None:
     check_softmax()
     check_perplexity()
@@ -3578,6 +3791,7 @@ def main() -> None:
     check_alignment()
     check_evaluation()
     check_rag()
+    check_agents()
     check_inference()
     check_distributed()
     print("ok")
